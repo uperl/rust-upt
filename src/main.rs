@@ -16,6 +16,7 @@ mod dist;
 mod external;
 mod json;
 mod metacpan;
+mod patchperl;
 mod paths;
 mod pathsearch;
 mod perlbuild;

@@ -64,6 +64,13 @@ pub static BUILTINS: &[Builtin] = &[
         help: None,
         run: crate::perlbuild::run,
     },
+    Builtin {
+        name: "patchperl",
+        summary: "Patch a Perl source tree so it builds on a modern toolchain",
+        legacy_name: Some("patchperl"),
+        help: None,
+        run: crate::patchperl::run,
+    },
 ];
 
 /// Look up a built-in by the name typed after `upt`.

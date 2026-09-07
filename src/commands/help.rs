@@ -82,12 +82,19 @@ pub fn general(cx: &Cx) -> String {
 
     let _ = writeln!(out, "{}", s.bold("Drop-in replacements:"));
     for b in commands::drop_in_replacements() {
-        let original = b.legacy_name.unwrap_or(b.name);
-        let _ = writeln!(
-            out,
-            "    {:<width$}    {} (also as `{original}`)",
-            b.name, b.summary
-        );
+        match b.legacy_name {
+            // Only note the legacy name when it differs from the `upt` name.
+            Some(legacy) if legacy != b.name => {
+                let _ = writeln!(
+                    out,
+                    "    {:<width$}    {} (also as `{legacy}`)",
+                    b.name, b.summary
+                );
+            }
+            _ => {
+                let _ = writeln!(out, "    {:<width$}    {}", b.name, b.summary);
+            }
+        }
     }
     out.push('\n');
 

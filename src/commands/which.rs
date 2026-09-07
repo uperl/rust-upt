@@ -132,11 +132,15 @@ impl Entry {
         let name = &self.subcommand;
         if let Some(builtin) = self.builtin {
             let note = match builtin.legacy_name {
+                None => String::new(),
+                // The legacy name is the `upt` name (e.g. `patchperl`).
+                Some(legacy) if legacy == builtin.name => " (drop-in replacement)".to_string(),
+                // Queried by the legacy name (`which perl-build`).
                 Some(legacy) if name.as_str() == legacy => {
                     format!(" (drop-in replacement; run as `upt {}`)", builtin.name)
                 }
+                // Queried by the `upt` name, or listed by `--all`.
                 Some(legacy) => format!(" (drop-in replacement for `{legacy}`)"),
-                None => String::new(),
             };
             println!("{name}: {}{note}", s.green("internal"));
         }

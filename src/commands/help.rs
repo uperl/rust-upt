@@ -89,10 +89,7 @@ pub fn general(cx: &Cx) -> String {
             b.name, b.summary
         );
     }
-    out.push_str(
-        "    Symlink or copy the `upt` binary to a replacement's own name to run\n    \
-         it directly.\n\n",
-    );
+    out.push('\n');
 
     let _ = writeln!(out, "{}", s.bold("External commands:"));
     out.push_str(
@@ -105,12 +102,6 @@ pub fn general(cx: &Cx) -> String {
         s.bold("Config file:"),
         cx.config_path.display()
     );
-    if let Some(dir) = &cx.cache_dir {
-        let _ = writeln!(out, "{}\n    {}", s.bold("Cache directory:"), dir.display());
-    }
-    if let Some(path) = &cx.database_path {
-        let _ = writeln!(out, "{}\n    {}", s.bold("Database:"), path.display());
-    }
 
     out
 }

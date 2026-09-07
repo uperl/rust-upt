@@ -25,8 +25,14 @@ pub fn run(cx: &Cx, args: &[String]) -> Result<i32> {
     };
 
     if let Some(builtin) = commands::find(topic) {
-        print!("{}", builtin.help);
-        return Ok(0);
+        return match builtin.help {
+            Some(text) => {
+                print!("{text}");
+                Ok(0)
+            }
+            // No static help: let the subcommand's own parser render it.
+            None => (builtin.run)(cx, &["--help".to_string()]),
+        };
     }
 
     if let Some(path) = pathsearch::find_external(topic) {

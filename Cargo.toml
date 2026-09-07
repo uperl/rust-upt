@@ -8,9 +8,22 @@ license = "MIT"
 
 [dependencies]
 anyhow = "1.0.104"
-dirs = "5.0"
+clap = { version = "4", features = ["derive"] }
+comfy-table = "7"
+dirs = "6"
+hex = "0.4"
+metacpan-api-modern = { git = "https://github.com/uperl/rust-metacpan-api-modern", tag = "v0.3.0" }
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 toml = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
 
 
 [package.metadata.deb]

@@ -12,6 +12,7 @@ use anyhow::{Result, anyhow, bail};
 mod commands;
 mod config;
 mod external;
+mod metacpan;
 mod paths;
 mod pathsearch;
 mod style;

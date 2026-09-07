@@ -14,7 +14,7 @@ upt which - show whether a subcommand is built in or found in PATH
 
 Usage:
     upt which [--json] <SUBCOMMAND>
-    upt which --all [--json]
+    upt which (--all | --all-legacy) [--json]
 
 Prints `internal` if <SUBCOMMAND> is a built-in upt command, and/or
 `external <PATH>` if an executable named `upt-<SUBCOMMAND>` is on your PATH.
@@ -23,11 +23,13 @@ is visible. A drop-in replacement resolves under either its `upt` name or the
 legacy command name it stands in for. Exits non-zero if neither is found.
 
 With --all, every known subcommand (built-in and every `upt-*` on PATH) is
-listed, sorted by name.
+listed, sorted by name. With --all-legacy, only the drop-in replacement
+subcommands are listed.
 
 Options:
-    -a, --all     List every subcommand instead of looking one up.
-    -j, --json    Print JSON: an object, or with --all an array of objects.
+    -a, --all       List every subcommand instead of looking one up.
+    --all-legacy    List only the drop-in replacement subcommands.
+    -j, --json      Print JSON: an object, or with --all[-legacy] an array.
 ";
 
 pub fn run(cx: &Cx, args: &[String]) -> Result<i32> {
@@ -38,9 +40,11 @@ pub fn run(cx: &Cx, args: &[String]) -> Result<i32> {
 
     let as_json = args.iter().any(|a| a == "-j" || a == "--json");
     let all = args.iter().any(|a| a == "-a" || a == "--all");
+    let all_legacy = args.iter().any(|a| a == "--all-legacy");
 
-    if all {
-        let entries = all_entries();
+    if all || all_legacy {
+        // `--all` is the superset, so it wins when both are given.
+        let entries = all_entries(all_legacy && !all);
         if as_json {
             let array: Vec<Value> = entries.iter().map(Entry::to_json).collect();
             print!(
@@ -145,14 +149,19 @@ impl Entry {
     }
 }
 
-/// Every known subcommand — every built-in and every `upt-*` on `PATH` — as
-/// `Entry`s, sorted by name. Drop-in replacements are listed under their
-/// canonical `upt` name only.
-fn all_entries() -> Vec<Entry> {
+/// Known subcommands as `Entry`s, sorted by name. With `legacy_only`, just the
+/// drop-in replacements; otherwise every built-in plus every `upt-*` on `PATH`.
+/// Drop-in replacements are listed under their canonical `upt` name only.
+fn all_entries(legacy_only: bool) -> Vec<Entry> {
     let externals = pathsearch::list_external();
 
-    let mut names: BTreeSet<&str> = commands::BUILTINS.iter().map(|b| b.name).collect();
-    names.extend(externals.keys().map(String::as_str));
+    let names: BTreeSet<&str> = if legacy_only {
+        commands::drop_in_replacements().map(|b| b.name).collect()
+    } else {
+        let mut names: BTreeSet<&str> = commands::BUILTINS.iter().map(|b| b.name).collect();
+        names.extend(externals.keys().map(String::as_str));
+        names
+    };
 
     names
         .into_iter()

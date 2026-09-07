@@ -39,6 +39,8 @@
 //! valid JSON. `pre-configure` always reports `exit` 0 and `success` true.
 //! Colour follows upt's `global.color` / `--color`.
 
+mod status;
+
 use std::ffi::OsString;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -52,6 +54,7 @@ use cpan_distribution_build::{
 use serde_json::{Value, json};
 
 use crate::json;
+use status::{Phase, Status};
 
 /// Entry point for the `dist` built-in: parse `args` with clap, resolve the
 /// colour decision from `cx`, then run the requested build step.
@@ -67,7 +70,25 @@ pub fn run(cx: &crate::Cx, args: &[String]) -> Result<i32> {
         }
     };
     let color = crate::style::resolve(cx.color, std::io::stdout().is_terminal());
-    dispatch(cli, color)
+    dispatch(cx, cli, color)
+}
+
+/// What a successful step does to the `dist_status` row.
+enum Outcome {
+    /// Set this phase's flag.
+    Mark(Phase),
+    /// `clean`: clear `build` / `test` / `install`.
+    ClearedBuild,
+    /// `distclean`: clear every flag.
+    ClearedAll,
+}
+
+/// Apply a `dist_status` update, downgrading a failure to a warning — the build
+/// step itself already ran, so it must not be turned into a command failure.
+fn record(result: Result<()>) {
+    if let Err(err) = result {
+        eprintln!("upt dist: could not update dist_status: {err:#}");
+    }
 }
 
 /// Step-by-step build and install of an unpacked CPAN distribution.
@@ -210,7 +231,7 @@ enum Command {
     Distclean,
 }
 
-fn dispatch(cli: Cli, color: bool) -> Result<i32> {
+fn dispatch(cx: &crate::Cx, cli: Cli, color: bool) -> Result<i32> {
     let Cli { common, command } = cli;
 
     let perl = build_perl(&common)?;
@@ -221,6 +242,17 @@ fn dispatch(cli: Cli, color: bool) -> Result<i32> {
                 common.directory.display()
             )
         })?;
+
+    // `dist_status` tracking: reconcile the row for this directory (and prune
+    // rows for directories that have since been removed). Best effort — a
+    // database problem must not stop a build.
+    let status = match Status::open(cx, &dist) {
+        Ok(status) => Some(status),
+        Err(err) => {
+            eprintln!("upt dist: status tracking unavailable: {err:#}");
+            None
+        }
+    };
 
     match command {
         Command::PreConfigure { all_prereqs } => {
@@ -238,6 +270,9 @@ fn dispatch(cli: Cli, color: bool) -> Result<i32> {
                 );
             } else {
                 print_pre_configure_table(&deps, all_prereqs, &dist.perl, color);
+            }
+            if let Some(status) = &status {
+                record(status.mark(Phase::PreConfigure));
             }
             Ok(0)
         }
@@ -271,19 +306,67 @@ fn dispatch(cli: Cli, color: bool) -> Result<i32> {
                     color,
                 );
             }
+            if result.is_success
+                && let Some(status) = &status
+            {
+                record(status.mark(Phase::Configure));
+            }
             Ok(i32::from(code))
         }
-        Command::Build => finish_step("build", &common, dist.execute_build()?, color),
-        Command::Test => finish_step("test", &common, dist.execute_test()?, color),
-        Command::Install => finish_step("install", &common, dist.execute_install()?, color),
-        Command::Clean => finish_step("clean", &common, dist.execute_clean()?, color),
-        Command::Distclean => finish_step("distclean", &common, dist.execute_distclean()?, color),
+        Command::Build => finish_step(
+            "build",
+            &common,
+            dist.execute_build()?,
+            color,
+            status.as_ref(),
+            Outcome::Mark(Phase::Build),
+        ),
+        Command::Test => finish_step(
+            "test",
+            &common,
+            dist.execute_test()?,
+            color,
+            status.as_ref(),
+            Outcome::Mark(Phase::Test),
+        ),
+        Command::Install => finish_step(
+            "install",
+            &common,
+            dist.execute_install()?,
+            color,
+            status.as_ref(),
+            Outcome::Mark(Phase::Install),
+        ),
+        Command::Clean => finish_step(
+            "clean",
+            &common,
+            dist.execute_clean()?,
+            color,
+            status.as_ref(),
+            Outcome::ClearedBuild,
+        ),
+        Command::Distclean => finish_step(
+            "distclean",
+            &common,
+            dist.execute_distclean()?,
+            color,
+            status.as_ref(),
+            Outcome::ClearedAll,
+        ),
     }
 }
 
-/// Emit the JSON envelope for a bare build step when `--json` is set, then map
-/// the [`ExecuteResult`] to a process exit code.
-fn finish_step(step: &str, common: &CommonArgs, result: ExecuteResult, color: bool) -> Result<i32> {
+/// Emit the JSON envelope for a bare build step when `--json` is set, map the
+/// [`ExecuteResult`] to a process exit code, and — on success — apply
+/// `outcome` to the `dist_status` row.
+fn finish_step(
+    step: &str,
+    common: &CommonArgs,
+    result: ExecuteResult,
+    color: bool,
+    status: Option<&Status>,
+    outcome: Outcome,
+) -> Result<i32> {
     let code = step_exit_code(step, &result);
     if common.json {
         print_json(
@@ -294,6 +377,15 @@ fn finish_step(step: &str, common: &CommonArgs, result: ExecuteResult, color: bo
             }),
             color,
         );
+    }
+    if result.is_success
+        && let Some(status) = status
+    {
+        record(match outcome {
+            Outcome::Mark(phase) => status.mark(phase),
+            Outcome::ClearedBuild => status.cleared_build(),
+            Outcome::ClearedAll => status.clear_all(),
+        });
     }
     Ok(i32::from(code))
 }

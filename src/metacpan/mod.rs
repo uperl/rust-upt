@@ -10,7 +10,6 @@
 //! error.
 
 mod diskusage;
-mod json;
 mod render;
 
 use std::ffi::OsString;
@@ -23,6 +22,8 @@ use metacpan_api_modern::reqwest::Url;
 use metacpan_api_modern::types::{DownloadUrl, Permission};
 use metacpan_api_modern::{Client, PodFormat};
 use serde_json::{Value, json};
+
+use crate::json;
 use sha2::{Digest, Sha256};
 
 /// `User-Agent` sent with every request; also shown in `--raw` output.

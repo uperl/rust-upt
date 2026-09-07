@@ -12,6 +12,12 @@ impl Style {
         Self { color }
     }
 
+    /// Whether this styler emits color — for handing an on/off decision to code
+    /// that colorizes its own output (e.g. the JSON pretty-printer).
+    pub fn enabled(&self) -> bool {
+        self.color
+    }
+
     fn paint(&self, code: &str, text: &str) -> String {
         if self.color {
             format!("\x1b[{code}m{text}\x1b[0m")

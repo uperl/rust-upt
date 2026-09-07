@@ -24,8 +24,7 @@
 //! Every step but `pre-configure` lets the child's output through to this
 //! process's stdout/stderr and exits with the child's status. `perl` and `make`
 //! output is therefore live; a failing step is reported as a non-zero exit,
-//! never as a panic. When more than one step runs, each is announced with a
-//! `==> <step>` line.
+//! never as a panic.
 //!
 //! `pre-configure` and `configure` also print the prerequisites they compute:
 //! by default as a `comfy-table` in the same house style as the rest of `upt`,
@@ -392,16 +391,12 @@ fn run_chain(
         .into_iter()
         .filter(|&step| step == target || !done[step.index()])
         .collect();
-    let announce = !common.json && steps.len() > 1;
 
     let mut output = String::new();
     let mut prereqs: Option<Value> = None;
 
     for step in steps {
         let is_target = step == target;
-        if announce {
-            println!("==> {}", phase_name(step));
-        }
 
         let succeeded = match step {
             Phase::PreConfigure => {

@@ -37,13 +37,25 @@ pub fn run(cx: &Cx, args: &[String]) -> Result<i32> {
     let exit = if found { 0 } else { 1 };
 
     if as_json {
-        let value = serde_json::json!({
-            "subcommand": name,
-            "found": found,
-            "internal": internal,
-            "external": external.as_ref().map(|p| p.display().to_string()),
-        });
-        print!("{}", json::to_string(&value, cx.style.enabled()));
+        let mut obj = serde_json::Map::new();
+        obj.insert("subcommand".into(), name.as_str().into());
+        obj.insert("found".into(), found.into());
+        obj.insert("internal".into(), internal.into());
+        // `path` only makes sense for a command resolved from PATH; a built-in
+        // takes precedence and has no path.
+        if !internal {
+            obj.insert(
+                "path".into(),
+                match &external {
+                    Some(p) => p.display().to_string().into(),
+                    None => serde_json::Value::Null,
+                },
+            );
+        }
+        print!(
+            "{}",
+            json::to_string(&serde_json::Value::Object(obj), cx.style.enabled())
+        );
         return Ok(exit);
     }
 

@@ -67,16 +67,32 @@ pub fn general(cx: &Cx) -> String {
     out.push_str("    -V, --version      Print version\n");
     out.push_str("    -h, --help         Print help\n\n");
 
-    let _ = writeln!(out, "{}", s.bold("Built-in commands:"));
+    // One column width across both command sections so they line up.
     let width = commands::BUILTINS
         .iter()
         .map(|b| b.name.len())
         .max()
         .unwrap_or(0);
-    for b in commands::BUILTINS {
+
+    let _ = writeln!(out, "{}", s.bold("Built-in commands:"));
+    for b in commands::ordinary() {
         let _ = writeln!(out, "    {:<width$}    {}", b.name, b.summary);
     }
     out.push('\n');
+
+    let _ = writeln!(out, "{}", s.bold("Drop-in replacements:"));
+    for b in commands::drop_in_replacements() {
+        let original = b.original_name.unwrap_or(b.name);
+        let _ = writeln!(
+            out,
+            "    {:<width$}    {} (also as `{original}`)",
+            b.name, b.summary
+        );
+    }
+    out.push_str(
+        "    Symlink or copy the `upt` binary to a replacement's own name to run\n    \
+         it directly.\n\n",
+    );
 
     let _ = writeln!(out, "{}", s.bold("External commands:"));
     out.push_str(

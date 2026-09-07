@@ -4,7 +4,7 @@
 //! executable named `upt-<name>` found on `PATH`, so `upt foo` runs `upt-foo`.
 
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -18,6 +18,7 @@ mod json;
 mod metacpan;
 mod paths;
 mod pathsearch;
+mod perlbuild;
 mod style;
 
 use config::{ColorChoice, Config};
@@ -58,21 +59,73 @@ fn main() -> ExitCode {
     match run() {
         Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
         Err(err) => {
-            eprintln!("upt: {err:#}");
+            eprintln!("{}: {err:#}", error_prog());
             ExitCode::from(1)
         }
     }
 }
 
+/// The name to prefix an error with: the drop-in replacement's own name when
+/// `upt` was invoked under it (a symlink or copy), otherwise `upt`.
+fn error_prog() -> String {
+    std::env::args_os()
+        .next()
+        .as_deref()
+        .map(Path::new)
+        .and_then(Path::file_stem)
+        .and_then(|stem| stem.to_str())
+        .filter(|name| commands::find_by_original_name(name).is_some())
+        .map_or_else(|| "upt".to_string(), str::to_owned)
+}
+
 fn run() -> Result<i32> {
-    let cli = Cli::parse(std::env::args().skip(1))?;
+    let raw: Vec<String> = std::env::args().collect();
+
+    // Invoked under the name of a command that a drop-in replacement stands in
+    // for (a symlink or copy of the `upt` binary, e.g. named `perl-build`): run
+    // that subcommand directly, forwarding every argument.
+    if let Some(program) = raw.first()
+        && let Some(name) = Path::new(program)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+        && let Some(builtin) = commands::find_by_original_name(name)
+    {
+        let cx = build_cx(None, None)?;
+        return (builtin.run)(&cx, &raw[1..]);
+    }
+
+    let cli = Cli::parse(raw.into_iter().skip(1))?;
 
     if cli.show_version {
         println!("upt {}", env!("CARGO_PKG_VERSION"));
         return Ok(0);
     }
 
-    let (config_path, default_path) = match cli.config {
+    let cx = build_cx(cli.config, cli.color)?;
+
+    let Some(name) = cli.subcommand else {
+        // No command given: usage to stderr, non-zero exit.
+        eprint!("{}", commands::help::general(&cx));
+        return Ok(2);
+    };
+
+    if let Some(builtin) = commands::find(&name) {
+        return (builtin.run)(&cx, &cli.args);
+    }
+
+    match pathsearch::find_external(&name) {
+        Some(path) => external::exec(&cx, &path, &cli.args),
+        None => bail!("'{name}' is not a upt command; see 'upt help'"),
+    }
+}
+
+/// Assemble the shared [`Cx`]: resolve the config path (writing a starter file
+/// on first run at the default location), load it, ensure the cache directory
+/// exists, and resolve the database path. `config_override` / `color_override`
+/// are the values from `upt`'s own `--config` / `--color`, absent when a
+/// drop-in replacement was invoked under its own name.
+fn build_cx(config_override: Option<PathBuf>, color_override: Option<ColorChoice>) -> Result<Cx> {
+    let (config_path, default_path) = match config_override {
         Some(path) => (path, false),
         None => (paths::config_file()?, true),
     };
@@ -101,29 +154,14 @@ fn run() -> Result<i32> {
     // when a subcommand actually calls `cx.open_db()`.
     let database_path = paths::data_file().ok();
 
-    let choice = cli.color.unwrap_or(config.global.color);
-    let cx = Cx {
+    let choice = color_override.unwrap_or(config.global.color);
+    Ok(Cx {
         style: Style::new(style::resolve(choice, std::io::stdout().is_terminal())),
         color: choice,
         config_path,
         cache_dir,
         database_path,
-    };
-
-    let Some(name) = cli.subcommand else {
-        // No command given: usage to stderr, non-zero exit.
-        eprint!("{}", commands::help::general(&cx));
-        return Ok(2);
-    };
-
-    if let Some(builtin) = commands::find(&name) {
-        return (builtin.run)(&cx, &cli.args);
-    }
-
-    match pathsearch::find_external(&name) {
-        Some(path) => external::exec(&cx, &path, &cli.args),
-        None => bail!("'{name}' is not a upt command; see 'upt help'"),
-    }
+    })
 }
 
 /// The parsed top-level command line: global options up to the first bare word,

@@ -12,13 +12,15 @@ clap = { version = "4", features = ["derive"] }
 comfy-table = "7"
 cpan-distribution-build = { git = "https://github.com/uperl/rust-cpan-distribution-build.git", tag = "v0.2.1" }
 dirs = "6"
+env_logger = "0.11"
 hex = "0.4"
 metacpan-api-modern = { git = "https://github.com/uperl/rust-metacpan-api-modern", tag = "v0.3.0" }
+perl-build = { version = "0.1.2", git = "https://github.com/uperl/rust-perl-build", tag = "v0.1.2" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }
 toml = "0.8"
 
 [target.'cfg(windows)'.dependencies]

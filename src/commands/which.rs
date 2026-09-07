@@ -13,7 +13,8 @@ Usage:
 Prints `internal` if <SUBCOMMAND> is a built-in upt command, and/or
 `external <PATH>` if an executable named `upt-<SUBCOMMAND>` is on your PATH.
 Built-ins take precedence when both exist; both lines are shown so shadowing
-is visible. Exits non-zero if neither is found.
+is visible. A drop-in replacement resolves under either its `upt` name or the
+original command name it stands in for. Exits non-zero if neither is found.
 
 Options:
     -j, --json    Print the result as a JSON object.
@@ -31,7 +32,9 @@ pub fn run(cx: &Cx, args: &[String]) -> Result<i32> {
         bail!("upt which: missing <SUBCOMMAND>\n\nUsage:\n    upt which [--json] <SUBCOMMAND>");
     };
 
-    let internal = commands::find(name).is_some();
+    let builtin = commands::find(name).or_else(|| commands::find_by_original_name(name));
+    let internal = builtin.is_some();
+    let replaces = builtin.and_then(|b| b.original_name);
     let external = pathsearch::find_external(name);
     let found = internal || external.is_some();
     let exit = if found { 0 } else { 1 };
@@ -41,6 +44,9 @@ pub fn run(cx: &Cx, args: &[String]) -> Result<i32> {
         obj.insert("subcommand".into(), name.as_str().into());
         obj.insert("found".into(), found.into());
         obj.insert("internal".into(), internal.into());
+        if let Some(replaces) = replaces {
+            obj.insert("replaces".into(), replaces.into());
+        }
         // `path` only makes sense for a command resolved from PATH; a built-in
         // takes precedence and has no path.
         if !internal {
@@ -60,8 +66,15 @@ pub fn run(cx: &Cx, args: &[String]) -> Result<i32> {
     }
 
     let s = &cx.style;
-    if internal {
-        println!("{name}: {}", s.green("internal"));
+    if let Some(builtin) = builtin {
+        let note = match builtin.original_name {
+            Some(original) if name.as_str() == original => {
+                format!(" (drop-in replacement; run as `upt {}`)", builtin.name)
+            }
+            Some(original) => format!(" (drop-in replacement for `{original}`)"),
+            None => String::new(),
+        };
+        println!("{name}: {}{note}", s.green("internal"));
     }
     if let Some(path) = &external {
         println!("{name}: {} {}", s.cyan("external"), path.display());

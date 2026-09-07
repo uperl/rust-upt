@@ -1,0 +1,25 @@
+[package]
+name = "upt"
+version = "0.1.0"
+edition = "2024"
+description = "Unified Perl Tool"
+repository = "https://github.com/uperl/upt"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0.104"
+
+
+[package.metadata.deb]
+maintainer = "Nobody <devnull@wdlabs.com>"
+copyright = "Nobody"
+extended-description = """\
+Unified Perl Tool"""
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/upt", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/upt/README.md", "644"],
+    ["LICENSE", "usr/share/doc/upt/LICENSE", "644"],
+]
+

@@ -1,7 +1,7 @@
 //! The user-specific SQLite database.
 //!
 //! A single file under the platform data directory
-//! ([`crate::paths::data_file`]), created lazily the first time a subcommand
+//! ([`crate::paths::database_file`]), created lazily the first time a subcommand
 //! calls [`crate::Cx::open_db`]. There is no central schema: each subcommand
 //! owns its own tables and registers an ordered list of migrations via
 //! [`migrate`], tracked per-component in the shared `upt_migrations` table.

@@ -25,13 +25,28 @@ pub fn cache_dir() -> Result<PathBuf> {
     Ok(dir.join("upt"))
 }
 
-/// Path to the user SQLite database. The file is created lazily the first time
-/// a subcommand asks for it.
+/// Path to the user SQLite database — persistent local *state* (which build
+/// steps have run, and so on), not portable user data. The file is created
+/// lazily the first time a subcommand asks for it.
 ///
-/// * Linux:   `~/.local/share/upt/upt.sqlite` (or `$XDG_DATA_HOME/upt/upt.sqlite`)
+/// * Linux:   `~/.local/state/upt/upt.sqlite` (or `$XDG_STATE_HOME/upt/upt.sqlite`)
 /// * macOS:   `~/Library/Application Support/upt/upt.sqlite`
-/// * Windows: `%APPDATA%\upt\upt.sqlite`
-pub fn data_file() -> Result<PathBuf> {
-    let dir = dirs::data_dir().context("could not determine the user data directory")?;
+/// * Windows: `%LOCALAPPDATA%\upt\upt.sqlite`
+pub fn database_file() -> Result<PathBuf> {
+    let dir = state_dir().context("could not determine the user state directory")?;
     Ok(dir.join("upt").join("upt.sqlite"))
+}
+
+/// The base directory for persistent local state: `$XDG_STATE_HOME`
+/// (`~/.local/state`) on Linux. macOS and Windows have no dedicated state
+/// location, so fall back to the general per-user data directory — the
+/// non-roaming `%LOCALAPPDATA%` on Windows, since state should not roam.
+fn state_dir() -> Option<PathBuf> {
+    dirs::state_dir().or_else(|| {
+        if cfg!(windows) {
+            dirs::data_local_dir()
+        } else {
+            dirs::data_dir()
+        }
+    })
 }

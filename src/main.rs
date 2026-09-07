@@ -152,7 +152,7 @@ fn build_cx(config_override: Option<PathBuf>, color_override: Option<ColorChoice
 
     // Resolved eagerly so `upt help` can show it, but the file is only created
     // when a subcommand actually calls `cx.open_db()`.
-    let database_path = paths::data_file().ok();
+    let database_path = paths::database_file().ok();
 
     let choice = color_override.unwrap_or(config.global.color);
     Ok(Cx {

@@ -1,7 +1,12 @@
 //! `upt which` — is a subcommand built in, or an external `upt-<name>` on PATH?
 
-use anyhow::{Result, bail};
+use std::collections::BTreeSet;
+use std::path::PathBuf;
 
+use anyhow::{Result, bail};
+use serde_json::Value;
+
+use crate::commands::Builtin;
 use crate::{Cx, commands, json, pathsearch};
 
 pub const HELP: &str = "\
@@ -9,15 +14,20 @@ upt which - show whether a subcommand is built in or found in PATH
 
 Usage:
     upt which [--json] <SUBCOMMAND>
+    upt which --all [--json]
 
 Prints `internal` if <SUBCOMMAND> is a built-in upt command, and/or
 `external <PATH>` if an executable named `upt-<SUBCOMMAND>` is on your PATH.
 Built-ins take precedence when both exist; both lines are shown so shadowing
 is visible. A drop-in replacement resolves under either its `upt` name or the
-original command name it stands in for. Exits non-zero if neither is found.
+legacy command name it stands in for. Exits non-zero if neither is found.
+
+With --all, every known subcommand (built-in and every `upt-*` on PATH) is
+listed, sorted by name.
 
 Options:
-    -j, --json    Print the result as a JSON object.
+    -a, --all     List every subcommand instead of looking one up.
+    -j, --json    Print JSON: an object, or with --all an array of objects.
 ";
 
 pub fn run(cx: &Cx, args: &[String]) -> Result<i32> {
@@ -27,64 +37,129 @@ pub fn run(cx: &Cx, args: &[String]) -> Result<i32> {
     }
 
     let as_json = args.iter().any(|a| a == "-j" || a == "--json");
+    let all = args.iter().any(|a| a == "-a" || a == "--all");
+
+    if all {
+        let entries = all_entries();
+        if as_json {
+            let array: Vec<Value> = entries.iter().map(Entry::to_json).collect();
+            print!(
+                "{}",
+                json::to_string(&Value::Array(array), cx.style.enabled())
+            );
+        } else {
+            for entry in &entries {
+                entry.print_text(cx);
+            }
+        }
+        return Ok(0);
+    }
 
     let Some(name) = args.iter().find(|a| !a.starts_with('-')) else {
-        bail!("upt which: missing <SUBCOMMAND>\n\nUsage:\n    upt which [--json] <SUBCOMMAND>");
+        bail!(
+            "upt which: missing <SUBCOMMAND>\n\nUsage:\n    upt which [--json] <SUBCOMMAND>\n    upt which --all [--json]"
+        );
     };
 
-    let builtin = commands::find(name).or_else(|| commands::find_by_legacy_name(name));
-    let internal = builtin.is_some();
-    let external = pathsearch::find_external(name);
-    let found = internal || external.is_some();
-    let exit = if found { 0 } else { 1 };
+    let entry = Entry {
+        subcommand: name.clone(),
+        builtin: commands::find(name).or_else(|| commands::find_by_legacy_name(name)),
+        external: pathsearch::find_external(name),
+    };
 
     if as_json {
+        print!("{}", json::to_string(&entry.to_json(), cx.style.enabled()));
+    } else {
+        entry.print_text(cx);
+    }
+    Ok(entry.exit_code())
+}
+
+/// How one subcommand name resolves: whether it names a built-in, and/or where
+/// its `upt-<name>` executable lives on `PATH`.
+struct Entry {
+    subcommand: String,
+    builtin: Option<&'static Builtin>,
+    external: Option<PathBuf>,
+}
+
+impl Entry {
+    fn internal(&self) -> bool {
+        self.builtin.is_some()
+    }
+
+    fn found(&self) -> bool {
+        self.internal() || self.external.is_some()
+    }
+
+    fn exit_code(&self) -> i32 {
+        i32::from(!self.found())
+    }
+
+    fn to_json(&self) -> Value {
         let mut obj = serde_json::Map::new();
-        obj.insert("subcommand".into(), name.as_str().into());
-        obj.insert("found".into(), found.into());
-        obj.insert("internal".into(), internal.into());
+        obj.insert("subcommand".into(), self.subcommand.as_str().into());
+        obj.insert("found".into(), self.found().into());
+        obj.insert("internal".into(), self.internal().into());
         // A drop-in replacement: report both its canonical `upt` name and the
-        // original command name it stands in for, whichever was queried.
-        if let Some(builtin) = builtin
-            && let Some(original) = builtin.legacy_name
+        // legacy command name it stands in for, whichever was queried.
+        if let Some(builtin) = self.builtin
+            && let Some(legacy) = builtin.legacy_name
         {
             obj.insert("name".into(), builtin.name.into());
-            obj.insert("legacy_name".into(), original.into());
+            obj.insert("legacy_name".into(), legacy.into());
         }
         // `path` only makes sense for a command resolved from PATH; a built-in
         // takes precedence and has no path.
-        if !internal {
+        if !self.internal() {
             obj.insert(
                 "path".into(),
-                match &external {
-                    Some(p) => p.display().to_string().into(),
-                    None => serde_json::Value::Null,
+                match &self.external {
+                    Some(path) => path.display().to_string().into(),
+                    None => Value::Null,
                 },
             );
         }
-        print!(
-            "{}",
-            json::to_string(&serde_json::Value::Object(obj), cx.style.enabled())
-        );
-        return Ok(exit);
+        Value::Object(obj)
     }
 
-    let s = &cx.style;
-    if let Some(builtin) = builtin {
-        let note = match builtin.legacy_name {
-            Some(original) if name.as_str() == original => {
-                format!(" (drop-in replacement; run as `upt {}`)", builtin.name)
-            }
-            Some(original) => format!(" (drop-in replacement for `{original}`)"),
-            None => String::new(),
-        };
-        println!("{name}: {}{note}", s.green("internal"));
+    fn print_text(&self, cx: &Cx) {
+        let s = &cx.style;
+        let name = &self.subcommand;
+        if let Some(builtin) = self.builtin {
+            let note = match builtin.legacy_name {
+                Some(legacy) if name.as_str() == legacy => {
+                    format!(" (drop-in replacement; run as `upt {}`)", builtin.name)
+                }
+                Some(legacy) => format!(" (drop-in replacement for `{legacy}`)"),
+                None => String::new(),
+            };
+            println!("{name}: {}{note}", s.green("internal"));
+        }
+        if let Some(path) = &self.external {
+            println!("{name}: {} {}", s.cyan("external"), path.display());
+        }
+        if !self.found() {
+            eprintln!("{name}: {}", s.red("not found"));
+        }
     }
-    if let Some(path) = &external {
-        println!("{name}: {} {}", s.cyan("external"), path.display());
-    }
-    if !found {
-        eprintln!("{name}: {}", s.red("not found"));
-    }
-    Ok(exit)
+}
+
+/// Every known subcommand — every built-in and every `upt-*` on `PATH` — as
+/// `Entry`s, sorted by name. Drop-in replacements are listed under their
+/// canonical `upt` name only.
+fn all_entries() -> Vec<Entry> {
+    let externals = pathsearch::list_external();
+
+    let mut names: BTreeSet<&str> = commands::BUILTINS.iter().map(|b| b.name).collect();
+    names.extend(externals.keys().map(String::as_str));
+
+    names
+        .into_iter()
+        .map(|name| Entry {
+            subcommand: name.to_string(),
+            builtin: commands::find(name),
+            external: externals.get(name).cloned(),
+        })
+        .collect()
 }

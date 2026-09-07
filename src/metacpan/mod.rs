@@ -7,8 +7,11 @@
 //! the underlying HTTP request and response instead, and `--curl` prints the
 //! equivalent `curl` command line without making the request.
 //!
-//! The only change from the standalone tool is the default cache directory:
-//! `<cache home>/upt/metacpan` instead of `<cache home>/uperl/metacpan`.
+//! The changes from the standalone tool are the default cache directory
+//! (`<cache home>/upt/metacpan` instead of `<cache home>/uperl/metacpan`) and
+//! that a failing request returns its error to `upt`, so it is reported the
+//! same way as every other `upt` error rather than with clap/anyhow's own
+//! `Error:` prefix.
 
 mod diskusage;
 mod json;
@@ -55,15 +58,10 @@ pub fn run(cx: &crate::Cx, args: &[String]) -> Result<i32> {
         .build()
         .context("starting the async runtime")?;
 
-    match runtime.block_on(dispatch(cx, cli)) {
-        Ok(()) => Ok(0),
-        // Reproduce the standalone binary's `fn main() -> Result<()>` behaviour:
-        // print the error chain (Debug form) prefixed with `Error:` and exit 1.
-        Err(err) => {
-            eprintln!("Error: {err:?}");
-            Ok(1)
-        }
-    }
+    // Let the error propagate so `upt`'s top-level handler reports it the same
+    // way as any other subcommand failure (`upt: <chain>`, exit 1).
+    runtime.block_on(dispatch(cx, cli))?;
+    Ok(0)
 }
 
 /// Command line interface to the MetaCPAN API.

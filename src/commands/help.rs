@@ -82,7 +82,7 @@ pub fn general(cx: &Cx) -> String {
 
     let _ = writeln!(out, "{}", s.bold("Drop-in replacements:"));
     for b in commands::drop_in_replacements() {
-        let original = b.original_name.unwrap_or(b.name);
+        let original = b.legacy_name.unwrap_or(b.name);
         let _ = writeln!(
             out,
             "    {:<width$}    {} (also as `{original}`)",

@@ -32,9 +32,8 @@ pub fn run(cx: &Cx, args: &[String]) -> Result<i32> {
         bail!("upt which: missing <SUBCOMMAND>\n\nUsage:\n    upt which [--json] <SUBCOMMAND>");
     };
 
-    let builtin = commands::find(name).or_else(|| commands::find_by_original_name(name));
+    let builtin = commands::find(name).or_else(|| commands::find_by_legacy_name(name));
     let internal = builtin.is_some();
-    let replaces = builtin.and_then(|b| b.original_name);
     let external = pathsearch::find_external(name);
     let found = internal || external.is_some();
     let exit = if found { 0 } else { 1 };
@@ -44,8 +43,13 @@ pub fn run(cx: &Cx, args: &[String]) -> Result<i32> {
         obj.insert("subcommand".into(), name.as_str().into());
         obj.insert("found".into(), found.into());
         obj.insert("internal".into(), internal.into());
-        if let Some(replaces) = replaces {
-            obj.insert("replaces".into(), replaces.into());
+        // A drop-in replacement: report both its canonical `upt` name and the
+        // original command name it stands in for, whichever was queried.
+        if let Some(builtin) = builtin
+            && let Some(original) = builtin.legacy_name
+        {
+            obj.insert("name".into(), builtin.name.into());
+            obj.insert("legacy_name".into(), original.into());
         }
         // `path` only makes sense for a command resolved from PATH; a built-in
         // takes precedence and has no path.
@@ -67,7 +71,7 @@ pub fn run(cx: &Cx, args: &[String]) -> Result<i32> {
 
     let s = &cx.style;
     if let Some(builtin) = builtin {
-        let note = match builtin.original_name {
+        let note = match builtin.legacy_name {
             Some(original) if name.as_str() == original => {
                 format!(" (drop-in replacement; run as `upt {}`)", builtin.name)
             }

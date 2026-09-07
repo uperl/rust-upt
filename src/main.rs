@@ -74,7 +74,7 @@ fn error_prog() -> String {
         .map(Path::new)
         .and_then(Path::file_stem)
         .and_then(|stem| stem.to_str())
-        .filter(|name| commands::find_by_original_name(name).is_some())
+        .filter(|name| commands::find_by_legacy_name(name).is_some())
         .map_or_else(|| "upt".to_string(), str::to_owned)
 }
 
@@ -88,7 +88,7 @@ fn run() -> Result<i32> {
         && let Some(name) = Path::new(program)
             .file_stem()
             .and_then(|stem| stem.to_str())
-        && let Some(builtin) = commands::find_by_original_name(name)
+        && let Some(builtin) = commands::find_by_legacy_name(name)
     {
         let cx = build_cx(None, None)?;
         return (builtin.run)(&cx, &raw[1..]);

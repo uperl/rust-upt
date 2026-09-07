@@ -14,10 +14,18 @@
 //! | `clean`         | `make clean`         | `perl Build clean`     |
 //! | `distclean`     | `make distclean`     | `perl Build distclean` |
 //!
+//! The steps form a pipeline: `configure` needs `pre-configure`; `build` needs
+//! both; `test` and `install` need `build` as well; and `install --test` adds
+//! `test`. Running a step first runs any earlier step the `dist_status` table
+//! ([`status`]) does not already record as done, in order, stopping (and
+//! exiting non-zero) at the first failure. `clean` and `distclean` are not part
+//! of the pipeline and never trigger an auto-run.
+//!
 //! Every step but `pre-configure` lets the child's output through to this
 //! process's stdout/stderr and exits with the child's status. `perl` and `make`
 //! output is therefore live; a failing step is reported as a non-zero exit,
-//! never as a panic.
+//! never as a panic. When more than one step runs, each is announced with a
+//! `==> <step>` line.
 //!
 //! `pre-configure` and `configure` also print the prerequisites they compute:
 //! by default as a `comfy-table` in the same house style as the rest of `upt`,
@@ -32,12 +40,11 @@
 //! there are none. This flag is table-only.
 //!
 //! `--json` replaces all of that with a single JSON object on stdout: the
-//! child's captured, merged stdout+stderr under `output` (the empty string for
-//! `pre-configure`, which runs nothing), the numeric `exit` code and a boolean
-//! `success`, plus a `prereqs` object for `pre-configure` and `configure`. The
-//! child's output is captured rather than streamed in this mode, so stdout stays
-//! valid JSON. `pre-configure` always reports `exit` 0 and `success` true.
-//! Colour follows upt's `global.color` / `--color`.
+//! merged, captured stdout+stderr of **every** step that ran, concatenated
+//! under `output`; the numeric `exit` code and a boolean `success` of the
+//! chain; plus a `prereqs` object when the target step is `pre-configure` or
+//! `configure`. Output is captured rather than streamed in this mode, so stdout
+//! stays valid JSON. Colour follows upt's `global.color` / `--color`.
 
 mod status;
 
@@ -71,16 +78,6 @@ pub fn run(cx: &crate::Cx, args: &[String]) -> Result<i32> {
     };
     let color = crate::style::resolve(cx.color, std::io::stdout().is_terminal());
     dispatch(cx, cli, color)
-}
-
-/// What a successful step does to the `dist_status` row.
-enum Outcome {
-    /// Set this phase's flag.
-    Mark(Phase),
-    /// `clean`: clear `build` / `test` / `install`.
-    ClearedBuild,
-    /// `distclean`: clear every flag.
-    ClearedAll,
 }
 
 /// Apply a `dist_status` update, downgrading a failure to a warning — the build
@@ -192,7 +189,8 @@ enum Command {
         all_prereqs: bool,
     },
 
-    /// Run the configure step: `perl Makefile.PL` or `perl Build.PL`.
+    /// Run the configure step: `perl Makefile.PL` or `perl Build.PL`. Runs
+    /// `pre-configure` first if it has not run yet.
     ///
     /// Afterwards the resolved prerequisites (taken from `MYMETA` when the
     /// configure step wrote one, otherwise from `META`) are printed as a
@@ -214,14 +212,22 @@ enum Command {
         include_develop: bool,
     },
 
-    /// Run the build step: `make` or `perl Build`.
+    /// Run the build step (`make` / `perl Build`), first running `pre-configure`
+    /// and `configure` if they have not run yet.
     Build,
 
-    /// Run the test suite: `make test` or `perl Build test`.
+    /// Run the test suite (`make test` / `perl Build test`), first running
+    /// `pre-configure`, `configure` and `build` if they have not run yet.
     Test,
 
-    /// Install the built distribution: `make install` or `perl Build install`.
-    Install,
+    /// Install the built distribution (`make install` / `perl Build install`),
+    /// first running `pre-configure`, `configure` and `build` (and, with
+    /// `--test`, `test`) if they have not run yet.
+    Install {
+        /// Also require the test suite to pass before installing.
+        #[arg(long)]
+        test: bool,
+    },
 
     /// Remove build products: `make clean` or `perl Build clean`.
     Clean,
@@ -255,117 +261,265 @@ fn dispatch(cx: &crate::Cx, cli: Cli, color: bool) -> Result<i32> {
     };
 
     match command {
-        Command::PreConfigure { all_prereqs } => {
-            let deps = dist.execute_pre_configure();
-            if common.json {
-                // `pre-configure` runs nothing: empty output, always successful.
-                print_json(
-                    &json!({
-                        "prereqs": pre_configure_prereqs_json(&deps),
-                        "output": "",
-                        "exit": 0,
-                        "success": true,
-                    }),
-                    color,
-                );
-            } else {
-                print_pre_configure_table(&deps, all_prereqs, &dist.perl, color);
-            }
-            if let Some(status) = &status {
-                record(status.mark(Phase::PreConfigure));
-            }
-            Ok(0)
-        }
+        Command::PreConfigure { all_prereqs } => run_chain(
+            &mut dist,
+            &common,
+            color,
+            status.as_ref(),
+            Phase::PreConfigure,
+            TargetOpts {
+                all_prereqs,
+                ..TargetOpts::default()
+            },
+        ),
         Command::Configure {
             no_prereqs,
             all_prereqs,
             include_develop,
-        } => {
-            let (result, deps) = dist
-                .execute_configure()
-                .context("the configure step could not be started")?;
-            let code = step_exit_code("configure", &result);
-            if common.json {
-                let mut obj = serde_json::Map::new();
-                if !no_prereqs {
-                    obj.insert("prereqs".to_string(), resolved_prereqs_json(&deps));
-                }
-                obj.insert(
-                    "output".to_string(),
-                    Value::String(captured_output(&result)),
-                );
-                obj.insert("exit".to_string(), json!(code));
-                obj.insert("success".to_string(), json!(result.is_success));
-                print_json(&Value::Object(obj), color);
-            } else if !no_prereqs {
-                print_resolved_prereqs_table(
-                    &deps,
-                    include_develop,
-                    all_prereqs,
-                    &dist.perl,
-                    color,
-                );
-            }
-            if result.is_success
-                && let Some(status) = &status
-            {
-                record(status.mark(Phase::Configure));
-            }
-            Ok(i32::from(code))
-        }
-        Command::Build => finish_step(
-            "build",
+        } => run_chain(
+            &mut dist,
             &common,
-            dist.execute_build()?,
             color,
             status.as_ref(),
-            Outcome::Mark(Phase::Build),
+            Phase::Configure,
+            TargetOpts {
+                no_prereqs,
+                all_prereqs,
+                include_develop,
+                ..TargetOpts::default()
+            },
         ),
-        Command::Test => finish_step(
-            "test",
+        Command::Build => run_chain(
+            &mut dist,
             &common,
-            dist.execute_test()?,
             color,
             status.as_ref(),
-            Outcome::Mark(Phase::Test),
+            Phase::Build,
+            TargetOpts::default(),
         ),
-        Command::Install => finish_step(
-            "install",
+        Command::Test => run_chain(
+            &mut dist,
             &common,
-            dist.execute_install()?,
             color,
             status.as_ref(),
-            Outcome::Mark(Phase::Install),
+            Phase::Test,
+            TargetOpts::default(),
         ),
-        Command::Clean => finish_step(
+        Command::Install { test } => run_chain(
+            &mut dist,
+            &common,
+            color,
+            status.as_ref(),
+            Phase::Install,
+            TargetOpts {
+                install_needs_test: test,
+                ..TargetOpts::default()
+            },
+        ),
+        Command::Clean => finish_cleanup(
             "clean",
             &common,
             dist.execute_clean()?,
             color,
             status.as_ref(),
-            Outcome::ClearedBuild,
+            Status::cleared_build,
         ),
-        Command::Distclean => finish_step(
+        Command::Distclean => finish_cleanup(
             "distclean",
             &common,
             dist.execute_distclean()?,
             color,
             status.as_ref(),
-            Outcome::ClearedAll,
+            Status::clear_all,
         ),
     }
 }
 
-/// Emit the JSON envelope for a bare build step when `--json` is set, map the
-/// [`ExecuteResult`] to a process exit code, and — on success — apply
-/// `outcome` to the `dist_status` row.
-fn finish_step(
+/// Options that only matter when their step is the explicit target of the
+/// command (the pre-configure / configure prerequisite-table filters), plus the
+/// `install --test` flag.
+#[derive(Default)]
+struct TargetOpts {
+    /// `configure --no-prereqs`: don't print the resolved prerequisite table.
+    no_prereqs: bool,
+    /// `--all-prereqs`: list satisfied prerequisites too.
+    all_prereqs: bool,
+    /// `configure --include-develop`: include `develop`-phase prerequisites.
+    include_develop: bool,
+    /// `install --test`: make `test` a prerequisite of `install`.
+    install_needs_test: bool,
+}
+
+/// The ordered list of pipeline steps to consider for `target`: every step from
+/// `pre-configure` up to and including `target`. `test` is dropped when the
+/// target is `install` and `--test` was not given.
+fn chain_plan(target: Phase, install_needs_test: bool) -> Vec<Phase> {
+    [
+        Phase::PreConfigure,
+        Phase::Configure,
+        Phase::Build,
+        Phase::Test,
+        Phase::Install,
+    ]
+    .into_iter()
+    .filter(|&step| step.index() <= target.index())
+    .filter(|&step| !(step == Phase::Test && target == Phase::Install && !install_needs_test))
+    .collect()
+}
+
+/// Run `target` and any earlier pipeline step that `dist_status` says has not
+/// run yet, in order. A prerequisite whose flag is already set is skipped; the
+/// target step always runs. The chain stops at the first failing step and the
+/// command exits with that step's status.
+///
+/// In `--json` mode the captured output of every step that ran is concatenated
+/// into a single `output` field; otherwise each step's output streams live.
+fn run_chain(
+    dist: &mut Distribution,
+    common: &CommonArgs,
+    color: bool,
+    status: Option<&Status>,
+    target: Phase,
+    opts: TargetOpts,
+) -> Result<i32> {
+    let done = match status {
+        Some(status) => status.flags()?,
+        // No database: treat nothing as done and run the whole chain.
+        None => [false; 5],
+    };
+
+    let steps: Vec<Phase> = chain_plan(target, opts.install_needs_test)
+        .into_iter()
+        .filter(|&step| step == target || !done[step.index()])
+        .collect();
+    let announce = !common.json && steps.len() > 1;
+
+    let mut output = String::new();
+    let mut prereqs: Option<Value> = None;
+
+    for step in steps {
+        let is_target = step == target;
+        if announce {
+            println!("==> {}", phase_name(step));
+        }
+
+        let succeeded = match step {
+            Phase::PreConfigure => {
+                let deps = dist.execute_pre_configure();
+                if is_target {
+                    if common.json {
+                        prereqs = Some(pre_configure_prereqs_json(&deps));
+                    } else {
+                        print_pre_configure_table(&deps, opts.all_prereqs, &dist.perl, color);
+                    }
+                }
+                mark(status, Phase::PreConfigure);
+                true
+            }
+            Phase::Configure => {
+                let (result, deps) = dist
+                    .execute_configure()
+                    .context("the configure step could not be started")?;
+                let code = step_exit_code("configure", &result);
+                if common.json {
+                    output.push_str(&captured_output(&result));
+                    if is_target {
+                        prereqs = Some(resolved_prereqs_json(&deps));
+                    }
+                } else if is_target && !opts.no_prereqs {
+                    print_resolved_prereqs_table(
+                        &deps,
+                        opts.include_develop,
+                        opts.all_prereqs,
+                        &dist.perl,
+                        color,
+                    );
+                }
+                if result.is_success {
+                    mark(status, Phase::Configure);
+                    true
+                } else {
+                    return Ok(emit_chain(common, color, &output, prereqs, code, false));
+                }
+            }
+            build_step => {
+                let result = match build_step {
+                    Phase::Build => dist.execute_build()?,
+                    Phase::Test => dist.execute_test()?,
+                    Phase::Install => dist.execute_install()?,
+                    Phase::PreConfigure | Phase::Configure => unreachable!(),
+                };
+                let code = step_exit_code(phase_name(build_step), &result);
+                if common.json {
+                    output.push_str(&captured_output(&result));
+                }
+                if result.is_success {
+                    mark(status, build_step);
+                    true
+                } else {
+                    return Ok(emit_chain(common, color, &output, prereqs, code, false));
+                }
+            }
+        };
+        debug_assert!(succeeded);
+    }
+
+    Ok(emit_chain(common, color, &output, prereqs, 0, true))
+}
+
+/// Emit the `--json` envelope for a finished (or aborted) chain and return the
+/// process exit code. Nothing is printed in non-`--json` mode — the steps have
+/// already streamed their own output.
+fn emit_chain(
+    common: &CommonArgs,
+    color: bool,
+    output: &str,
+    prereqs: Option<Value>,
+    code: u8,
+    success: bool,
+) -> i32 {
+    if common.json {
+        let mut obj = serde_json::Map::new();
+        if let Some(prereqs) = prereqs {
+            obj.insert("prereqs".to_string(), prereqs);
+        }
+        obj.insert("output".to_string(), Value::String(output.to_string()));
+        obj.insert("exit".to_string(), json!(code));
+        obj.insert("success".to_string(), json!(success));
+        print_json(&Value::Object(obj), color);
+    }
+    i32::from(code)
+}
+
+/// Set `phase`'s `dist_status` flag, downgrading a database failure to a
+/// warning — the step itself already ran.
+fn mark(status: Option<&Status>, phase: Phase) {
+    if let Some(status) = status {
+        record(status.mark(phase));
+    }
+}
+
+/// The spelling used for a phase in messages and `step_exit_code`.
+fn phase_name(phase: Phase) -> &'static str {
+    match phase {
+        Phase::PreConfigure => "pre-configure",
+        Phase::Configure => "configure",
+        Phase::Build => "build",
+        Phase::Test => "test",
+        Phase::Install => "install",
+    }
+}
+
+/// `clean` / `distclean`: run the step, emit the `--json` envelope, and on
+/// success apply `clear` to the `dist_status` row. These are not part of the
+/// build pipeline, so nothing is auto-run.
+fn finish_cleanup(
     step: &str,
     common: &CommonArgs,
     result: ExecuteResult,
     color: bool,
     status: Option<&Status>,
-    outcome: Outcome,
+    clear: fn(&Status) -> Result<()>,
 ) -> Result<i32> {
     let code = step_exit_code(step, &result);
     if common.json {
@@ -381,11 +535,7 @@ fn finish_step(
     if result.is_success
         && let Some(status) = status
     {
-        record(match outcome {
-            Outcome::Mark(phase) => status.mark(phase),
-            Outcome::ClearedBuild => status.cleared_build(),
-            Outcome::ClearedAll => status.clear_all(),
-        });
+        record(clear(status));
     }
     Ok(i32::from(code))
 }
@@ -847,8 +997,46 @@ fn step_exit_code(step: &str, result: &ExecuteResult) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{cmp_versions, parse_perl_version, version_satisfies};
+    use super::{
+        Phase, chain_plan, cmp_versions, parse_perl_version, phase_name, version_satisfies,
+    };
     use std::cmp::Ordering;
+
+    fn plan_names(target: Phase, install_needs_test: bool) -> Vec<&'static str> {
+        chain_plan(target, install_needs_test)
+            .into_iter()
+            .map(phase_name)
+            .collect()
+    }
+
+    #[test]
+    fn chain_plan_lists_every_earlier_step_in_order() {
+        assert_eq!(plan_names(Phase::PreConfigure, false), ["pre-configure"]);
+        assert_eq!(
+            plan_names(Phase::Configure, false),
+            ["pre-configure", "configure"]
+        );
+        assert_eq!(
+            plan_names(Phase::Build, false),
+            ["pre-configure", "configure", "build"]
+        );
+        assert_eq!(
+            plan_names(Phase::Test, false),
+            ["pre-configure", "configure", "build", "test"]
+        );
+    }
+
+    #[test]
+    fn install_includes_test_only_with_the_flag() {
+        assert_eq!(
+            plan_names(Phase::Install, false),
+            ["pre-configure", "configure", "build", "install"]
+        );
+        assert_eq!(
+            plan_names(Phase::Install, true),
+            ["pre-configure", "configure", "build", "test", "install"]
+        );
+    }
 
     #[test]
     fn perl_decimal_versions_split_into_three_digit_groups() {

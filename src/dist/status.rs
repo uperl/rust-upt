@@ -31,14 +31,29 @@ const MIGRATIONS: &[&str] = &["CREATE TABLE dist_status (
         install       INTEGER NOT NULL DEFAULT 0
     );"];
 
-/// A build phase that carries a completion flag in `dist_status`.
-#[derive(Clone, Copy)]
+/// A build phase that carries a completion flag in `dist_status`, in pipeline
+/// order.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     PreConfigure,
     Configure,
     Build,
     Test,
     Install,
+}
+
+impl Phase {
+    /// Position in the pipeline, and the index of this phase's flag in the
+    /// array returned by [`Status::flags`].
+    pub fn index(self) -> usize {
+        match self {
+            Phase::PreConfigure => 0,
+            Phase::Configure => 1,
+            Phase::Build => 2,
+            Phase::Test => 3,
+            Phase::Install => 4,
+        }
+    }
 }
 
 /// A handle to the `dist_status` row for one distribution directory.
@@ -73,6 +88,26 @@ impl Status {
                 .context("clearing dist_status after an assumed distclean")?;
         }
         Ok(status)
+    }
+
+    /// The completion flags for this directory, indexed by [`Phase::index`]:
+    /// `[pre_configure, configure, build, test, install]`.
+    pub fn flags(&self) -> Result<[bool; 5]> {
+        let flags = self.conn.query_row(
+            "SELECT pre_configure, configure, build, test, install
+               FROM dist_status WHERE directory = ?1",
+            params![self.directory],
+            |row| {
+                Ok([
+                    row.get::<_, i64>(0)? != 0,
+                    row.get::<_, i64>(1)? != 0,
+                    row.get::<_, i64>(2)? != 0,
+                    row.get::<_, i64>(3)? != 0,
+                    row.get::<_, i64>(4)? != 0,
+                ])
+            },
+        )?;
+        Ok(flags)
     }
 
     /// Mark `phase` complete for this directory.

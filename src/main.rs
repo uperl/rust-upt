@@ -26,6 +26,10 @@ pub const EXTERNAL_PREFIX: &str = "upt-";
 /// Context shared with every subcommand.
 pub struct Cx {
     pub style: Style,
+    /// The effective color choice (`--color` over `global.color`), before it is
+    /// resolved against a specific stream. Subcommands with their own output
+    /// styling (e.g. `metacpan`) fall back to this when not given `--color`.
+    pub color: ColorChoice,
     pub config_path: PathBuf,
     pub cache_dir: Option<PathBuf>,
 }
@@ -48,17 +52,26 @@ fn run() -> Result<i32> {
         return Ok(0);
     }
 
-    let config_path = match cli.config {
-        Some(path) => path,
-        None => paths::config_file()?,
+    let (config_path, default_path) = match cli.config {
+        Some(path) => (path, false),
+        None => (paths::config_file()?, true),
     };
+
+    // First run: drop a starter config file at the default location so the
+    // user has something to edit. Best effort — a failure here is not fatal,
+    // `Config::load` just falls back to the defaults. An explicit `--config`
+    // path is never created behind the user's back.
+    if default_path && !config_path.exists() {
+        if let Some(parent) = config_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&config_path, config::DEFAULT_FILE);
+    }
+
     let config = Config::load(&config_path)?;
 
-    // Best effort: make sure the config and cache directories exist so plugins
-    // and the user can rely on them.
-    if let Some(parent) = config_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
+    // Best effort: make sure the cache directory exists so plugins and the
+    // user can rely on it.
     let cache_dir = paths::cache_dir().ok();
     if let Some(dir) = &cache_dir {
         let _ = std::fs::create_dir_all(dir);
@@ -67,6 +80,7 @@ fn run() -> Result<i32> {
     let choice = cli.color.unwrap_or(config.global.color);
     let cx = Cx {
         style: Style::new(style::resolve(choice, std::io::stdout().is_terminal())),
+        color: choice,
         config_path,
         cache_dir,
     };
@@ -124,9 +138,9 @@ impl Cli {
                 "-h" | "--help" => want_help = true,
                 "-V" | "--version" => cli.show_version = true,
                 "--color" => {
-                    let value = raw
-                        .get(i)
-                        .ok_or_else(|| anyhow!("--color requires a value: on, off, or auto"))?;
+                    let value = raw.get(i).ok_or_else(|| {
+                        anyhow!("--color requires a value: always, never, or auto")
+                    })?;
                     cli.color = Some(parse_color(value)?);
                     i += 1;
                 }
@@ -171,10 +185,10 @@ impl Cli {
 
 fn parse_color(value: &str) -> Result<ColorChoice> {
     match value {
-        "on" | "always" | "yes" => Ok(ColorChoice::On),
-        "off" | "never" | "no" => Ok(ColorChoice::Off),
+        "always" => Ok(ColorChoice::Always),
+        "never" => Ok(ColorChoice::Never),
         "auto" => Ok(ColorChoice::Auto),
-        other => bail!("invalid --color value '{other}'; expected on, off, or auto"),
+        other => bail!("invalid --color value '{other}'; expected always, never, or auto"),
     }
 }
 
@@ -201,8 +215,8 @@ mod tests {
 
     #[test]
     fn global_options_before_subcommand() {
-        let cli = parse(&["--color", "off", "--config=/tmp/c.toml", "help", "which"]);
-        assert_eq!(cli.color, Some(ColorChoice::Off));
+        let cli = parse(&["--color", "never", "--config=/tmp/c.toml", "help", "which"]);
+        assert_eq!(cli.color, Some(ColorChoice::Never));
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/c.toml")));
         assert_eq!(cli.subcommand.as_deref(), Some("help"));
         assert_eq!(cli.args, vec!["which"]);

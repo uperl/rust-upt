@@ -43,8 +43,8 @@ impl Style {
 /// (or empty), per <https://no-color.org/>.
 pub fn resolve(choice: ColorChoice, stream_is_tty: bool) -> bool {
     match choice {
-        ColorChoice::On => true,
-        ColorChoice::Off => false,
+        ColorChoice::Always => true,
+        ColorChoice::Never => false,
         ColorChoice::Auto => {
             stream_is_tty && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
         }
@@ -56,9 +56,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn on_and_off_ignore_tty() {
-        assert!(resolve(ColorChoice::On, false));
-        assert!(!resolve(ColorChoice::Off, true));
+    fn always_and_never_ignore_tty() {
+        assert!(resolve(ColorChoice::Always, false));
+        assert!(!resolve(ColorChoice::Never, true));
     }
 
     #[test]

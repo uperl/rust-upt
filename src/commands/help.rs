@@ -62,7 +62,7 @@ pub fn general(cx: &Cx) -> String {
     );
 
     let _ = writeln!(out, "{}", s.bold("Options:"));
-    out.push_str("    --color <WHEN>     When to use color: on, off, auto\n");
+    out.push_str("    --color <WHEN>     When to use color: always, never, auto\n");
     out.push_str("    --config <FILE>    Use an alternate config file\n");
     out.push_str("    -V, --version      Print version\n");
     out.push_str("    -h, --help         Print help\n\n");

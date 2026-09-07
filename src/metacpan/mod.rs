@@ -1,17 +1,13 @@
 //! `upt metacpan` — a command line interface to the MetaCPAN API.
 //!
-//! This is the `uperl-metacpan` tool, folded in verbatim as a built-in
-//! subcommand. Each MetaCPAN document type is a sub-subcommand. Results print
-//! as a formatted table by default; `--json` switches to pretty-printed JSON,
-//! coloured when stdout is a terminal (override with `--color`); `--raw` prints
-//! the underlying HTTP request and response instead, and `--curl` prints the
-//! equivalent `curl` command line without making the request.
-//!
-//! The changes from the standalone tool are the default cache directory
-//! (`<cache home>/upt/metacpan` instead of `<cache home>/uperl/metacpan`) and
-//! that a failing request returns its error to `upt`, so it is reported the
-//! same way as every other `upt` error rather than with clap/anyhow's own
-//! `Error:` prefix.
+//! Each MetaCPAN document type is a sub-subcommand. Results print as a
+//! formatted table by default; `--json` switches to pretty-printed JSON,
+//! coloured per `--color` (which defaults to upt's effective `global.color`);
+//! `--raw` prints the underlying HTTP request and response instead, and
+//! `--curl` prints the equivalent `curl` command line without making the
+//! request. Responses are cached under `<cache home>/upt/metacpan`. A failing
+//! request returns its error to `upt`, so it is reported like any other `upt`
+//! error.
 
 mod diskusage;
 mod json;
@@ -29,14 +25,8 @@ use metacpan_api_modern::{Client, PodFormat};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-/// Version reported by `upt metacpan --version`. Pinned to the `uperl-metacpan`
-/// release this was taken from rather than `upt`'s own version, so the tool
-/// keeps identifying itself the same way.
-const METACPAN_VERSION: &str = "0.2.0";
-
-/// `User-Agent` sent with every request; also shown in `--raw` output. Kept
-/// identical to the standalone tool so the wire behaviour does not change.
-const USER_AGENT: &str = "uperl-metacpan/0.2.0";
+/// `User-Agent` sent with every request; also shown in `--raw` output.
+const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
 /// Entry point for the `metacpan` built-in: parse `args` with clap, then run the
 /// request on a fresh Tokio runtime.
@@ -68,7 +58,7 @@ pub fn run(cx: &crate::Cx, args: &[String]) -> Result<i32> {
 #[derive(Parser)]
 #[command(
     name = "upt metacpan",
-    version = METACPAN_VERSION,
+    version,
     about = "Command line interface to the MetaCPAN API",
     long_about = None,
 )]
@@ -86,15 +76,9 @@ struct GlobalOpts {
     #[arg(long, short = 'j', global = true)]
     json: bool,
 
-    /// When to colourise JSON output.
-    #[arg(
-        long,
-        value_enum,
-        default_value = "auto",
-        global = true,
-        value_name = "WHEN"
-    )]
-    color: ColorWhen,
+    /// When to colourise JSON output. Defaults to upt's `global.color` setting.
+    #[arg(long, value_enum, global = true, value_name = "WHEN")]
+    color: Option<ColorWhen>,
 
     /// Directory for the on-disk response cache.
     ///
@@ -130,6 +114,16 @@ enum ColorWhen {
     Always,
     /// Never colour.
     Never,
+}
+
+impl From<crate::config::ColorChoice> for ColorWhen {
+    fn from(choice: crate::config::ColorChoice) -> Self {
+        match choice {
+            crate::config::ColorChoice::Always => ColorWhen::Always,
+            crate::config::ColorChoice::Never => ColorWhen::Never,
+            crate::config::ColorChoice::Auto => ColorWhen::Auto,
+        }
+    }
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -400,7 +394,8 @@ enum Command {
 
 async fn dispatch(cx: &crate::Cx, cli: Cli) -> Result<()> {
     let g = &cli.global;
-    let color = match g.color {
+    // `--color` wins; without it, follow upt's effective `global.color`.
+    let color = match g.color.unwrap_or_else(|| cx.color.into()) {
         ColorWhen::Always => true,
         ColorWhen::Never => false,
         ColorWhen::Auto => std::io::stdout().is_terminal(),

@@ -10,11 +10,12 @@ license = "MIT"
 anyhow = "1.0.104"
 clap = { version = "4", features = ["derive"] }
 comfy-table = "7"
+cpan-distribution-build = { git = "https://github.com/uperl/rust-cpan-distribution-build.git", tag = "v0.2.1" }
 dirs = "6"
 hex = "0.4"
 metacpan-api-modern = { git = "https://github.com/uperl/rust-metacpan-api-modern", tag = "v0.3.0" }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 toml = "0.8"

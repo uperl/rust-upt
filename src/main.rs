@@ -11,6 +11,7 @@ use anyhow::{Result, anyhow, bail};
 
 mod commands;
 mod config;
+mod dist;
 mod external;
 mod json;
 mod metacpan;

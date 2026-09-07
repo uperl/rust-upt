@@ -188,6 +188,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "cpan-distribution-build"
+version = "0.2.1"
+source = "git+https://github.com/uperl/rust-cpan-distribution-build.git?tag=v0.2.1#8879cfd2edfb7e87b028cf8747d744bbdd31332a"
+dependencies = [
+ "anyhow",
+ "cpan-distribution-meta",
+ "perl-wrapper",
+]
+
+[[package]]
+name = "cpan-distribution-meta"
+version = "0.1.1"
+source = "git+https://github.com/uperl/rust-cpan-distribution-meta.git?tag=v0.1.1#5810faf91bcb2a0ab852a46613bc09d77a7b371b"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "thiserror",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -751,6 +772,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
+name = "os_pipe"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
+dependencies = [
+ "libc",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -778,6 +809,16 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+
+[[package]]
+name = "perl-wrapper"
+version = "0.2.0"
+source = "git+https://github.com/uperl/rust-perl-wrapper.git?tag=v0.2.0#2bf2106bcb6b5b3afded522e20b0cb2ea6db620d"
+dependencies = [
+ "anyhow",
+ "os_pipe",
+ "which",
+]
 
 [[package]]
 name = "pin-project-lite"
@@ -1080,11 +1121,25 @@ version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
 dependencies = [
+ "indexmap",
  "itoa",
  "memchr",
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "serde_norway"
+version = "0.9.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e408f29489b5fd500fab51ff1484fc859bb655f32c671f307dcd733b72e8168c"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml-norway",
 ]
 
 [[package]]
@@ -1424,6 +1479,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 
 [[package]]
+name = "unsafe-libyaml-norway"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b39abd59bf32521c7f2301b52d05a6a2c975b6003521cbd0c6dc1582f0a22104"
+
+[[package]]
 name = "untrusted"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1436,6 +1497,7 @@ dependencies = [
  "anyhow",
  "clap",
  "comfy-table",
+ "cpan-distribution-build",
  "dirs",
  "hex",
  "metacpan-api-modern",
@@ -1574,6 +1636,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
 dependencies = [
  "rustls-pki-types",
+]
+
+[[package]]
+name = "which"
+version = "8.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bae2f2b2b816647a1cab1acc91f5bd20812d53cb344382635ec2181940c8034f"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

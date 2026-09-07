@@ -42,6 +42,12 @@ pub static BUILTINS: &[Builtin] = &[
         help: None,
         run: crate::metacpan::run,
     },
+    Builtin {
+        name: "dist",
+        summary: "Step-by-step build and install of an unpacked CPAN distribution",
+        help: None,
+        run: crate::dist::run,
+    },
 ];
 
 /// Look up a built-in by name.

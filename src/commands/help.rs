@@ -92,6 +92,9 @@ pub fn general(cx: &Cx) -> String {
     if let Some(dir) = &cx.cache_dir {
         let _ = writeln!(out, "{}\n    {}", s.bold("Cache directory:"), dir.display());
     }
+    if let Some(path) = &cx.database_path {
+        let _ = writeln!(out, "{}\n    {}", s.bold("Database:"), path.display());
+    }
 
     out
 }

@@ -7,10 +7,11 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 mod commands;
 mod config;
+mod db;
 mod dist;
 mod external;
 mod json;
@@ -34,6 +35,23 @@ pub struct Cx {
     pub color: ColorChoice,
     pub config_path: PathBuf,
     pub cache_dir: Option<PathBuf>,
+    /// Location of the user SQLite database. `None` only when the platform data
+    /// directory cannot be determined. The file itself is not created until a
+    /// subcommand calls [`Cx::open_db`].
+    pub database_path: Option<PathBuf>,
+}
+
+impl Cx {
+    /// Open the user database, creating the file and its parent directory on
+    /// first use. Each caller migrates its own tables with [`db::migrate`];
+    /// there is no shared schema.
+    pub fn open_db(&self) -> Result<rusqlite::Connection> {
+        let path = self
+            .database_path
+            .as_deref()
+            .context("could not determine the user data directory for the database")?;
+        db::open(path)
+    }
 }
 
 fn main() -> ExitCode {
@@ -79,12 +97,17 @@ fn run() -> Result<i32> {
         let _ = std::fs::create_dir_all(dir);
     }
 
+    // Resolved eagerly so `upt help` can show it, but the file is only created
+    // when a subcommand actually calls `cx.open_db()`.
+    let database_path = paths::data_file().ok();
+
     let choice = cli.color.unwrap_or(config.global.color);
     let cx = Cx {
         style: Style::new(style::resolve(choice, std::io::stdout().is_terminal())),
         color: choice,
         config_path,
         cache_dir,
+        database_path,
     };
 
     let Some(name) = cli.subcommand else {

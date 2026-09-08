@@ -107,27 +107,20 @@ pub fn author(value: Value, color: bool) -> Result<()> {
     f.opt("city", &a.city);
     f.opt("region", &a.region);
     f.opt("country", &a.country);
-    if !a.profile.is_empty() {
-        let profiles = a
-            .profile
-            .iter()
-            .filter_map(|p| match (&p.name, &p.id) {
-                (Some(n), Some(i)) => Some(format!("{n}:{i}")),
-                (Some(n), None) => Some(n.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        f.list("profile", &profiles);
+    // One `profile <service>` row per entry, rather than a single joined cell.
+    for p in &a.profile {
+        let Some(name) = p.name.as_deref() else {
+            continue;
+        };
+        f.text(&format!("profile {name}"), p.id.as_deref().unwrap_or("-"));
     }
     if let Some(rc) = &a.release_count {
+        // One `releases <kind>` row per tally, like the profile rows above.
+        f.text("releases cpan", rc.cpan.unwrap_or(0).to_string());
+        f.text("releases latest", rc.latest.unwrap_or(0).to_string());
         f.text(
-            "releases",
-            format!(
-                "cpan {}, latest {}, backpan-only {}",
-                rc.cpan.unwrap_or(0),
-                rc.latest.unwrap_or(0),
-                rc.backpan_only.unwrap_or(0),
-            ),
+            "releases backpan-only",
+            rc.backpan_only.unwrap_or(0).to_string(),
         );
     }
     f.opt("updated", &a.updated);

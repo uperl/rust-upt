@@ -19,10 +19,11 @@ mod metacpan;
 mod patchperl;
 mod paths;
 mod pathsearch;
+mod perl;
 mod perlbuild;
 mod style;
 
-use config::{ColorChoice, Config, PatchPerlMode};
+use config::{ColorChoice, Config, DistPrefer, PatchPerlMode, PerlSection};
 use style::Style;
 
 /// Prefix for external subcommand executables: `upt foo` -> `upt-foo`.
@@ -44,6 +45,12 @@ pub struct Cx {
     /// `perlbuild.patch-perl` from the config: how `upt perlbuild` applies
     /// Devel::PatchPerl fix-ups.
     pub patch_perl: PatchPerlMode,
+    /// `dist.prefer` from the config: which build tool `upt dist` prefers for a
+    /// dual-config distribution, unless `--prefer` overrides it.
+    pub dist_prefer: DistPrefer,
+    /// The `[perl]` config section: named `perl-wrapper` configurations and the
+    /// default one, used by `upt perl exec`.
+    pub perl: PerlSection,
 }
 
 impl Cx {
@@ -166,6 +173,8 @@ fn build_cx(config_override: Option<PathBuf>, color_override: Option<ColorChoice
         cache_dir,
         database_path,
         patch_perl: config.perlbuild.patch_perl,
+        dist_prefer: config.dist.prefer,
+        perl: config.perl,
     })
 }
 

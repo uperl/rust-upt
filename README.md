@@ -66,6 +66,16 @@ database, so re-running a step is cheap. `pre-configure` and `configure` also
 print a prerequisite table (only the unmet rows unless `--all-prereqs`).
 `--json` replaces the tables and live output with a single JSON envelope.
 
+The interpreter to build with comes from a `[perl.<name>]` config section:
+`--perl <name>` selects it, and without it `perl.default` is used — the same
+resolution as [`upt perl exec`](#upt-perl).
+
+### `upt perl <SUBCOMMAND>`
+
+Run a configured `perl` and manage the named `perl-wrapper` configurations in
+the `[perl.<name>]` sections of the config file. See [`upt perl`](#upt-perl)
+below for the individual subcommands.
+
 ## Drop-in replacements
 
 These built-ins reproduce the command-line interface of an existing CPAN tool.
@@ -89,6 +99,120 @@ replacement for [`patchperl`](https://metacpan.org/dist/Devel-PatchPerl).
 Takes the source tree (default `.`) and, optionally, the Perl version to patch
 as (otherwise read from `patchlevel.h`).
 
+## `upt perl`
+
+Work with the named [`perl-wrapper`][perl-wrapper] configurations in the
+`[perl.<name>]` sections of the config file.
+
+### `upt perl exec`
+
+Run `perl` through the wrapper built from a `[perl.<name>]` section.
+
+```
+upt perl exec [--perl <name>] [-- <perl options>...]
+```
+
+* `--perl <name>` selects the `[perl.<name>]` config section. Without it, the
+  section named by `perl.default` is used.
+* Everything after `--` is passed straight to `perl`.
+* The command exits with `perl`'s own status.
+
+```sh
+upt perl exec --perl dev -- -E 'say "$^X $]"'
+```
+
+### `upt perl register`
+
+Add a new `[perl.<name>]` section to the config file (comments and other
+sections are preserved).
+
+```
+upt perl register <perl binary> --perl <name> [--make <path>]
+                   [--install-base <dir>] [--lib <dir>]...
+```
+
+* `--perl <name>` is required and must not already be a `[perl.<name>]` in the
+  config (nor the reserved name `default`).
+* `--make` defaults to `$Config{make}` of the given interpreter.
+* `--install-base` and `--lib` are optional; `--lib` may be repeated.
+
+```sh
+upt perl register /opt/perl-5.40/bin/perl --perl dev \
+    --install-base ~/perl5 --lib ~/code/lib
+```
+
+### `upt perl select`
+
+Point `perl.default` at an already-registered `[perl.<name>]` — the section
+`upt perl exec` uses when it is run without `--perl` (comments and other
+sections are preserved).
+
+```
+upt perl select --perl <name>
+```
+
+* `--perl <name>` is required and must already be a `[perl.<name>]` in the
+  config (register it first; the reserved name `default` is rejected).
+
+```sh
+upt perl select --perl dev
+```
+
+### `upt perl list`
+
+List the names of the `[perl.<name>]` sections in the config file, one per
+line and sorted. `perl.default` is not shown.
+
+```
+upt perl list [--json]
+```
+
+* `--json` (`-j`) prints the names as a JSON array of strings instead.
+
+```sh
+upt perl list
+upt perl list --json
+```
+
+### `upt perl default`
+
+Print the name of `perl.default` — the section `upt perl exec` uses when it
+is run without `--perl`. Exits non-zero when `perl.default` is not set.
+
+```
+upt perl default [--json]
+```
+
+* `--json` (`-j`) prints the name as a single-element JSON array of strings.
+
+```sh
+upt perl default
+upt perl default --json
+```
+
+### `upt perl info`
+
+Show every setting of one `[perl.<name>]` section — a `Field` / `Value`
+table by default, or a JSON object with `--json`.
+
+```
+upt perl info [--perl <name>] [--json]
+```
+
+* `--perl <name>` selects the section. Without it, the `perl.default`
+  section is shown (an error if `perl.default` is unset).
+* Unset optional settings render as a fallback note in the table
+  (`(first perl on PATH)`, `(none)`, …) and as `null` / `[]` in JSON.
+* `--json` (`-j`) keys: `name`, `default` (bool), `perl`, `make`,
+  `install-base`, `lib` (array).
+
+```sh
+upt perl info
+upt perl info --perl dev --json
+```
+
+[perl-wrapper]: https://github.com/uperl/rust-perl-wrapper
+
 ## External commands
 
 Any executable named `upt-<name>` on your `PATH` can be run as `upt <name>`,
@@ -97,7 +221,7 @@ with every following argument forwarded verbatim.
 ## Configuration
 
 `upt` writes a starter `config.toml` on first run and reads it on every
-invocation. It has two sections:
+invocation:
 
 ```toml
 [global]
@@ -111,6 +235,28 @@ color = "auto"
 #   "internal" - only the bundled patch-perl crate
 #   "off"      - apply no fix-ups
 patch-perl = "auto"
+
+[dist]
+# Which build tool `upt dist` prefers for a distribution shipping BOTH
+# `Build.PL` and `Makefile.PL` (ignored otherwise); `upt dist --prefer`
+# overrides it:
+#   "auto" - follow the build library's own choice
+#   "mb"   - prefer `Build.PL` (Module::Build)
+#   "eumm" - prefer `Makefile.PL` (ExtUtils::MakeMaker)
+prefer = "auto"
+
+# Named perl-wrapper configurations for `upt perl`. Each [perl.<name>] table
+# builds one perl-wrapper object.
+[perl]
+# The [perl.<name>] used when `upt perl exec` runs without `--perl`
+# (so a perl entry cannot itself be named "default").
+default = "dev"
+
+[perl.dev]
+perl = "/opt/perl-5.40/bin/perl"   # default: first `perl` on PATH
+make = "/usr/bin/gmake"            # default: first `make` on PATH
+install-base = "/home/me/perl5"    # local::lib / INSTALL_BASE prefix
+lib = ["/home/me/code/lib"]        # prepended to PERL5LIB
 ```
 
 Platform locations:

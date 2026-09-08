@@ -15,8 +15,9 @@
 //! | `distclean`     | `make distclean`     | `perl Build distclean` |
 //!
 //! The steps form a pipeline: `configure` needs `pre-configure`; `build` needs
-//! both; `test` and `install` need `build` as well; and `install --test` adds
-//! `test`. Running a step first runs any earlier step the `dist_status` table
+//! both; `test` and `install` need `build` as well; and `install` includes
+//! `test` unless `--no-test`. Running a step first runs any earlier step the
+//! `dist_status` table
 //! ([`status`]) does not already record as done, in order, stopping (and
 //! exiting non-zero) at the first failure. `clean` and `distclean` are not part
 //! of the pipeline and never trigger an auto-run.
@@ -25,6 +26,15 @@
 //! process's stdout/stderr and exits with the child's status. `perl` and `make`
 //! output is therefore live; a failing step is reported as a non-zero exit,
 //! never as a panic.
+//!
+//! The interpreter (and its `make`, `install-base` and `lib`) comes from a
+//! `[perl.<name>]` config section, selected with `--perl <name>` or, without
+//! it, `perl.default` — the same resolution `upt perl exec` uses.
+//!
+//! For a distribution that ships both `Build.PL` and `Makefile.PL`, the build
+//! tool is chosen by `--prefer <auto|mb|eumm>`, or `dist.prefer` from the
+//! config when the flag is absent (default `auto`: the build library's own
+//! choice). It is ignored when the distribution ships only one.
 //!
 //! `pre-configure` and `configure` also print the prerequisites they compute:
 //! by default as a `comfy-table` in the same house style as the rest of `upt`,
@@ -49,7 +59,7 @@ mod status;
 
 use std::ffi::OsString;
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -118,28 +128,17 @@ struct CommonArgs {
     )]
     directory: PathBuf,
 
-    /// Perl interpreter to build with (default: the first `perl` on `PATH`).
-    #[arg(long, global = true, value_name = "PATH")]
-    perl: Option<PathBuf>,
-
-    /// `make` to use for `ExtUtils::MakeMaker` distributions (default: the first
-    /// `make` on `PATH`).
-    #[arg(long, global = true, value_name = "PATH")]
-    make: Option<PathBuf>,
-
-    /// Install newly built modules under this prefix, the way `local::lib` /
-    /// `INSTALL_BASE` would (default: the interpreter's own site directories).
-    #[arg(long, global = true, value_name = "DIR")]
-    install_base: Option<PathBuf>,
-
-    /// Directory to add to `PERL5LIB` when running build steps; repeatable.
-    #[arg(long = "lib", global = true, value_name = "DIR")]
-    lib: Vec<PathBuf>,
+    /// Name of the `[perl.<name>]` config section to build with (its `perl`,
+    /// `make`, `install-base` and `lib` settings). Without it, `perl.default`
+    /// is used.
+    #[arg(long, global = true, value_name = "NAME")]
+    perl: Option<String>,
 
     /// Which build tool to use when the distribution ships *both* `Build.PL` and
-    /// `Makefile.PL` (ignored when only one is present).
-    #[arg(long, global = true, value_name = "TOOL", default_value_t = Prefer::Mb)]
-    prefer: Prefer,
+    /// `Makefile.PL` (ignored when only one is present). Overrides `dist.prefer`
+    /// in the config; without either, `auto` (the build library's own choice).
+    #[arg(long, global = true, value_name = "TOOL")]
+    prefer: Option<Prefer>,
 
     /// Emit a single JSON object on stdout instead of tables and live output:
     /// the captured command `output`, plus `prereqs` for `pre-configure` and
@@ -148,30 +147,35 @@ struct CommonArgs {
     json: bool,
 }
 
-/// Build-tool preference for a dual-config distribution.
+/// Build-tool preference for a dual-config distribution (`--prefer`, or
+/// `dist.prefer` from the config).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Prefer {
-    /// `ExtUtils::MakeMaker` (`Makefile.PL`).
-    Eumm,
+    /// Follow the build library's own choice (currently `Module::Build`).
+    Auto,
     /// `Module::Build` (`Build.PL`).
     Mb,
+    /// `ExtUtils::MakeMaker` (`Makefile.PL`).
+    Eumm,
 }
 
 impl std::fmt::Display for Prefer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
-            Prefer::Eumm => "eumm",
+            Prefer::Auto => "auto",
             Prefer::Mb => "mb",
+            Prefer::Eumm => "eumm",
         };
         f.write_str(s)
     }
 }
 
-impl From<Prefer> for BuildTool {
-    fn from(prefer: Prefer) -> Self {
+impl From<crate::config::DistPrefer> for Prefer {
+    fn from(prefer: crate::config::DistPrefer) -> Self {
         match prefer {
-            Prefer::Eumm => BuildTool::Eumm,
-            Prefer::Mb => BuildTool::ModuleBuild,
+            crate::config::DistPrefer::Auto => Prefer::Auto,
+            crate::config::DistPrefer::Mb => Prefer::Mb,
+            crate::config::DistPrefer::Eumm => Prefer::Eumm,
         }
     }
 }
@@ -220,12 +224,12 @@ enum Command {
     Test,
 
     /// Install the built distribution (`make install` / `perl Build install`),
-    /// first running `pre-configure`, `configure` and `build` (and, with
-    /// `--test`, `test`) if they have not run yet.
+    /// first running `pre-configure`, `configure`, `build` and `test` if they
+    /// have not run yet. `--no-test` skips the `test` step.
     Install {
-        /// Also require the test suite to pass before installing.
-        #[arg(long)]
-        test: bool,
+        /// Install without running the test suite first.
+        #[arg(long = "no-test", short = 'n')]
+        no_test: bool,
     },
 
     /// Remove build products: `make clean` or `perl Build clean`.
@@ -239,14 +243,11 @@ enum Command {
 fn dispatch(cx: &crate::Cx, cli: Cli, color: bool) -> Result<i32> {
     let Cli { common, command } = cli;
 
-    let perl = build_perl(&common)?;
-    let mut dist = Distribution::with_preference(&common.directory, perl, common.prefer.into())
-        .with_context(|| {
-            format!(
-                "failed to open a CPAN distribution in {}",
-                common.directory.display()
-            )
-        })?;
+    let perl = build_perl(cx, &common)?;
+    // `--prefer` wins; without it, `dist.prefer` from the config (default
+    // `auto`).
+    let prefer = common.prefer.unwrap_or_else(|| cx.dist_prefer.into());
+    let mut dist = open_distribution(&common.directory, perl, prefer)?;
 
     // `dist_status` tracking: reconcile the row for this directory (and prune
     // rows for directories that have since been removed). Best effort — a
@@ -304,14 +305,14 @@ fn dispatch(cx: &crate::Cx, cli: Cli, color: bool) -> Result<i32> {
             Phase::Test,
             TargetOpts::default(),
         ),
-        Command::Install { test } => run_chain(
+        Command::Install { no_test } => run_chain(
             &mut dist,
             &common,
             color,
             status.as_ref(),
             Phase::Install,
             TargetOpts {
-                install_needs_test: test,
+                install_needs_test: !no_test,
                 ..TargetOpts::default()
             },
         ),
@@ -336,7 +337,7 @@ fn dispatch(cx: &crate::Cx, cli: Cli, color: bool) -> Result<i32> {
 
 /// Options that only matter when their step is the explicit target of the
 /// command (the pre-configure / configure prerequisite-table filters), plus the
-/// `install --test` flag.
+/// `install --no-test` flag.
 #[derive(Default)]
 struct TargetOpts {
     /// `configure --no-prereqs`: don't print the resolved prerequisite table.
@@ -345,13 +346,14 @@ struct TargetOpts {
     all_prereqs: bool,
     /// `configure --include-develop`: include `develop`-phase prerequisites.
     include_develop: bool,
-    /// `install --test`: make `test` a prerequisite of `install`.
+    /// Whether `test` is part of the `install` chain: true by default, false
+    /// with `install --no-test`.
     install_needs_test: bool,
 }
 
 /// The ordered list of pipeline steps to consider for `target`: every step from
 /// `pre-configure` up to and including `target`. `test` is dropped when the
-/// target is `install` and `--test` was not given.
+/// target is `install` and `--no-test` was given.
 fn chain_plan(target: Phase, install_needs_test: bool) -> Vec<Phase> {
     [
         Phase::PreConfigure,
@@ -544,28 +546,26 @@ fn captured_output(result: &ExecuteResult) -> String {
         .unwrap_or_default()
 }
 
-/// Assemble the [`Perl`] wrapper from the shared options. Command output is
-/// captured (rather than inherited) when `--json` is in effect, so it can be
-/// folded into the JSON envelope.
-fn build_perl(common: &CommonArgs) -> Result<Perl> {
-    let mut perl = match &common.perl {
-        Some(path) => Perl::with_perl(path),
-        None => Perl::new().context("could not locate a `perl` interpreter on PATH")?,
-    };
-
-    perl = perl.with_capture_output(common.json);
-
-    if let Some(make) = &common.make {
-        perl = perl.with_make(make);
-    }
-    if let Some(base) = &common.install_base {
-        perl = perl.with_install_base(base);
-    }
-    if !common.lib.is_empty() {
-        perl = perl.with_lib(common.lib.clone());
-    }
-
+/// Assemble the [`Perl`] wrapper from the `[perl.<name>]` config section named
+/// by `--perl` (or `perl.default`), the same way `upt perl exec` does. Command
+/// output is captured (rather than inherited) when `--json` is in effect, so it
+/// can be folded into the JSON envelope.
+fn build_perl(cx: &crate::Cx, common: &CommonArgs) -> Result<Perl> {
+    let (_name, config) = crate::perl::resolve_perl(cx, common.perl.as_deref())?;
+    let perl = crate::perl::build_wrapper(config)?.with_capture_output(common.json);
     Ok(perl)
+}
+
+/// Open the distribution in `dir`, honouring the resolved build-tool
+/// preference. `Prefer::Auto` defers to the build library's own default;
+/// `Mb` / `Eumm` pin the tool for a distribution that ships both configs.
+fn open_distribution(dir: &Path, perl: Perl, prefer: Prefer) -> Result<Distribution> {
+    let opened = match prefer {
+        Prefer::Auto => Distribution::new(dir, perl),
+        Prefer::Mb => Distribution::with_preference(dir, perl, BuildTool::ModuleBuild),
+        Prefer::Eumm => Distribution::with_preference(dir, perl, BuildTool::Eumm),
+    };
+    opened.with_context(|| format!("failed to open a CPAN distribution in {}", dir.display()))
 }
 
 /// The pre-configure prerequisites as `{ "configure": [ { "module", "version" },
@@ -993,9 +993,72 @@ fn step_exit_code(step: &str, result: &ExecuteResult) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Phase, chain_plan, cmp_versions, parse_perl_version, phase_name, version_satisfies,
+        Cli, Command, Phase, Prefer, chain_plan, cmp_versions, parse_perl_version, phase_name,
+        version_satisfies,
     };
+    use clap::Parser;
     use std::cmp::Ordering;
+
+    #[test]
+    fn install_runs_test_by_default_and_no_test_skips_it() {
+        let no_test = |args: &[&str]| {
+            let argv: Vec<&str> = std::iter::once("upt dist")
+                .chain(args.iter().copied())
+                .collect();
+            match Cli::try_parse_from(argv).unwrap().command {
+                Command::Install { no_test } => no_test,
+                other => panic!("expected install, got {other:?}"),
+            }
+        };
+        assert!(!no_test(&["install"]), "test runs by default");
+        assert!(no_test(&["install", "--no-test"]));
+        assert!(no_test(&["install", "-n"]));
+
+        // `--test` is gone.
+        assert!(Cli::try_parse_from(["upt dist", "install", "--test"]).is_err());
+    }
+
+    #[test]
+    fn prefer_is_optional_on_the_cli_and_maps_from_dist_prefer() {
+        // Not given -> None, so `dist.prefer` from the config decides.
+        assert_eq!(
+            Cli::try_parse_from(["upt dist", "build"])
+                .unwrap()
+                .common
+                .prefer,
+            None
+        );
+        assert_eq!(
+            Cli::try_parse_from(["upt dist", "--prefer", "eumm", "build"])
+                .unwrap()
+                .common
+                .prefer,
+            Some(Prefer::Eumm)
+        );
+        // `auto` is a valid `--prefer` value.
+        assert!(Cli::try_parse_from(["upt dist", "--prefer", "auto", "build"]).is_ok());
+
+        use crate::config::DistPrefer;
+        assert_eq!(Prefer::from(DistPrefer::Auto), Prefer::Auto);
+        assert_eq!(Prefer::from(DistPrefer::Mb), Prefer::Mb);
+        assert_eq!(Prefer::from(DistPrefer::Eumm), Prefer::Eumm);
+    }
+
+    #[test]
+    fn perl_flag_is_a_config_section_name_and_the_wrapper_knobs_are_gone() {
+        let cli = Cli::try_parse_from(["upt dist", "--perl", "dev", "build"]).unwrap();
+        assert_eq!(cli.common.perl.as_deref(), Some("dev"));
+
+        // `--make` / `--install-base` / `--lib` moved into the [perl.<name>]
+        // config section, so `upt dist` no longer accepts them.
+        for flag in [["--make", "m"], ["--install-base", "d"], ["--lib", "d"]] {
+            assert!(
+                Cli::try_parse_from(["upt dist", flag[0], flag[1], "build"]).is_err(),
+                "{} should be rejected",
+                flag[0]
+            );
+        }
+    }
 
     fn plan_names(target: Phase, install_needs_test: bool) -> Vec<&'static str> {
         chain_plan(target, install_needs_test)
@@ -1022,11 +1085,13 @@ mod tests {
     }
 
     #[test]
-    fn install_includes_test_only_with_the_flag() {
+    fn install_chain_includes_test_unless_disabled() {
+        // `install --no-test` (install_needs_test = false): no `test` step.
         assert_eq!(
             plan_names(Phase::Install, false),
             ["pre-configure", "configure", "build", "install"]
         );
+        // Plain `install` (install_needs_test = true): `test` runs first.
         assert_eq!(
             plan_names(Phase::Install, true),
             ["pre-configure", "configure", "build", "test", "install"]

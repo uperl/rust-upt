@@ -14,7 +14,9 @@
 //!   without running the test suite first, and skips `test`-phase prerequisites.
 //!   `--recommended` and `--suggested` additionally install the `recommends`
 //!   and `suggests` prerequisites of every phase, recursively, as though they
-//!   were `requires`.
+//!   were `requires` (so a failure to install one is fatal); `--try-recommended`
+//!   and `--try-suggested` attempt the same prerequisites but log and skip any
+//!   that fail to install.
 //!
 //! # Resolution
 //!
@@ -184,7 +186,8 @@ enum Command {
     /// with `--source mirror`), download and unpack the release, and run the
     /// `dist` pipeline through `install` on it, recursively installing missing
     /// `requires` prerequisites (and `recommends` / `suggests` with
-    /// `--recommended` / `--suggested`).
+    /// `--recommended` / `--suggested`, or best-effort with `--try-recommended` /
+    /// `--try-suggested`).
     Install(InstallArgs),
 }
 
@@ -206,14 +209,24 @@ struct InstallArgs {
     no_test: bool,
 
     /// Also install `recommends` prerequisites, at every phase, as though they
-    /// were hard `requires`.
-    #[arg(long = "recommended")]
+    /// were hard `requires` — a failure to install one aborts the run.
+    #[arg(long = "recommended", conflicts_with = "try_recommend")]
     recommend: bool,
 
     /// Also install `suggests` prerequisites, at every phase, as though they
-    /// were hard `requires`.
-    #[arg(long = "suggested")]
+    /// were hard `requires` — a failure to install one aborts the run.
+    #[arg(long = "suggested", conflicts_with = "try_suggest")]
     suggest: bool,
+
+    /// Attempt the `recommends` prerequisites of every phase, but on any failure
+    /// log it and carry on without them.
+    #[arg(long = "try-recommended")]
+    try_recommend: bool,
+
+    /// Attempt the `suggests` prerequisites of every phase, but on any failure
+    /// log it and carry on without them.
+    #[arg(long = "try-suggested")]
+    try_suggest: bool,
 }
 
 /// `upt cpan install`: set up the run directory, then walk each SPEC through the
@@ -275,6 +288,8 @@ fn install(cx: &crate::Cx, common: &CommonArgs, args: InstallArgs) -> Result<i32
             no_test: args.no_test,
             recommend: args.recommend,
             suggest: args.suggest,
+            try_recommend: args.try_recommend,
+            try_suggest: args.try_suggest,
             source: resolved.source,
             mirror_base_url: resolved.mirror_base_url,
             packages,
@@ -529,6 +544,12 @@ struct Installer {
     /// Promote every phase's `suggests` prerequisites to install like a
     /// `requires` (`--suggested`).
     suggest: bool,
+    /// Attempt every phase's `recommends` prerequisites, but keep going without
+    /// any that fail to install (`--try-recommended`).
+    try_recommend: bool,
+    /// Attempt every phase's `suggests` prerequisites, but keep going without
+    /// any that fail to install (`--try-suggested`).
+    try_suggest: bool,
     source: CpanSource,
     mirror_base_url: String,
     /// The mirror's `02packages.details.txt` index, loaded once when
@@ -663,6 +684,16 @@ impl Installer {
             self.install_dep(client, dep).await?;
         }
 
+        // `--try-recommended` / `--try-suggested`: attempt these, but a build
+        // failure for one is logged and stepped over, not fatal.
+        let optional = self.missing(&dist.perl, self.resolved_optional(&tree).into_iter());
+        for dep in optional {
+            let module = dep.module.clone();
+            if let Err(err) = self.install_dep(client, dep).await {
+                eprintln!("{label}  configure  skipped optional {module}: {err:#}");
+            }
+        }
+
         // --- build / test / install.
         self.run_step(&dist, &label, "build")?;
         if !self.no_test {
@@ -713,13 +744,33 @@ impl Installer {
             .insert(distribution.to_string())
     }
 
-    /// The prerequisites from a resolved dependency tree that `upt cpan` will
-    /// try to install: the `requires` of `configure`, `build` and `runtime`
-    /// always, plus `test` unless `--no-test`; and, when `--recommended` /
-    /// `--suggested` are given, the `recommends` / `suggests` of those same
-    /// phases alongside them.
+    /// The prerequisites from a resolved dependency tree that `upt cpan` must
+    /// install (a failure is fatal): the `requires` of `configure`, `build` and
+    /// `runtime` always, plus `test` unless `--no-test`; and, when
+    /// `--recommended` / `--suggested` are given, the `recommends` / `suggests`
+    /// of those same phases alongside them.
     fn resolved_requires<'a>(&self, tree: &'a Dependencies) -> Vec<&'a Dependency> {
-        install_deps(tree, self.no_test, self.recommend, self.suggest)
+        phase_deps(
+            tree,
+            self.no_test,
+            DepKinds::required(self.recommend, self.suggest),
+        )
+    }
+
+    /// The prerequisites from a resolved dependency tree that `--try-recommended`
+    /// / `--try-suggested` ask `upt cpan` to attempt without letting a failure
+    /// stop the run: the `recommends` / `suggests` of `configure`, `build` and
+    /// `runtime`, plus `test` unless `--no-test`.
+    fn resolved_optional<'a>(&self, tree: &'a Dependencies) -> Vec<&'a Dependency> {
+        phase_deps(
+            tree,
+            self.no_test,
+            DepKinds {
+                requires: false,
+                recommends: self.try_recommend,
+                suggests: self.try_suggest,
+            },
+        )
     }
 
     /// The subset of `deps` that is not already satisfied on `perl`'s search
@@ -870,33 +921,51 @@ impl Installer {
     }
 }
 
-/// The prerequisites a resolved dependency `tree` contributes to an install
-/// run: the `requires` of `configure`, `build` and `runtime` (and `test` unless
-/// `no_test`), plus — when `recommend` / `suggest` is set — the `recommends` /
-/// `suggests` of those same phases, promoted to install like a `requires`.
+/// Which prerequisite relationships to pull out of each phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DepKinds {
+    requires: bool,
+    recommends: bool,
+    suggests: bool,
+}
+
+impl DepKinds {
+    /// `requires` always, `recommends` / `suggests` only when the matching
+    /// promote flag (`--recommended` / `--suggested`) is set.
+    fn required(recommends: bool, suggests: bool) -> Self {
+        Self {
+            requires: true,
+            recommends,
+            suggests,
+        }
+    }
+}
+
+/// The prerequisites a resolved dependency `tree` contributes to an install run:
+/// the selected relationships (per `kinds`) of `configure`, `build` and
+/// `runtime`, plus `test` unless `no_test`.
 ///
-/// `requires` come first and in phase order, so with both flags off this is
-/// exactly the old `configure`/`build`/`runtime`/`test` `requires` chain.
-fn install_deps(
-    tree: &Dependencies,
-    no_test: bool,
-    recommend: bool,
-    suggest: bool,
-) -> Vec<&Dependency> {
+/// Within the result `requires` come first, then `recommends`, then `suggests`,
+/// each in `configure` / `build` / `runtime` / `test` order — so
+/// `phase_deps(tree, no_test, DepKinds::required(false, false))` is exactly the
+/// old `requires`-only chain.
+fn phase_deps(tree: &Dependencies, no_test: bool, kinds: DepKinds) -> Vec<&Dependency> {
     let mut phases = vec![&tree.configure, &tree.build, &tree.runtime];
     if !no_test {
         phases.push(&tree.test);
     }
     let mut out = Vec::new();
-    for phase in &phases {
-        out.extend(&phase.requires);
+    if kinds.requires {
+        for phase in &phases {
+            out.extend(&phase.requires);
+        }
     }
-    if recommend {
+    if kinds.recommends {
         for phase in &phases {
             out.extend(&phase.recommends);
         }
     }
-    if suggest {
+    if kinds.suggests {
         for phase in &phases {
             out.extend(&phase.suggests);
         }
@@ -1245,10 +1314,41 @@ mod tests {
     #[test]
     fn install_accepts_recommended_and_suggested_flags() {
         let args = install_args(&["install", "JSON::PP"]);
-        assert!(!args.recommend && !args.suggest);
+        assert!(!args.recommend && !args.suggest && !args.try_recommend && !args.try_suggest);
 
         let args = install_args(&["install", "--recommended", "--suggested", "JSON::PP"]);
         assert!(args.recommend && args.suggest);
+
+        let args = install_args(&[
+            "install",
+            "--try-recommended",
+            "--try-suggested",
+            "JSON::PP",
+        ]);
+        assert!(args.try_recommend && args.try_suggest);
+
+        // `--recommended` and `--try-recommended` (likewise for suggested) are
+        // mutually exclusive.
+        assert!(
+            Cli::try_parse_from([
+                "upt cpan",
+                "install",
+                "--recommended",
+                "--try-recommended",
+                "JSON::PP",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "upt cpan",
+                "install",
+                "--suggested",
+                "--try-suggested",
+                "JSON::PP",
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -1311,27 +1411,27 @@ mod tests {
     }
 
     #[test]
-    fn install_deps_defaults_to_requires_in_phase_order() {
+    fn phase_deps_defaults_to_requires_in_phase_order() {
         let tree = sample_tree();
         // configure, build, runtime, then test.
         assert_eq!(
-            modules(&install_deps(&tree, false, false, false)),
+            modules(&phase_deps(&tree, false, DepKinds::required(false, false))),
             ["ExtUtils::MakeMaker", "Carp", "Test::More"]
         );
         // `--no-test` drops the whole test phase.
         assert_eq!(
-            modules(&install_deps(&tree, true, false, false)),
+            modules(&phase_deps(&tree, true, DepKinds::required(false, false))),
             ["ExtUtils::MakeMaker", "Carp"]
         );
     }
 
     #[test]
-    fn install_deps_adds_recommends_and_suggests_when_asked() {
+    fn phase_deps_adds_recommends_and_suggests_when_asked() {
         let tree = sample_tree();
 
         // `--recommended`: every phase's `recommends`, after all the `requires`.
         assert_eq!(
-            modules(&install_deps(&tree, false, true, false)),
+            modules(&phase_deps(&tree, false, DepKinds::required(true, false))),
             [
                 "ExtUtils::MakeMaker",
                 "Carp",
@@ -1345,7 +1445,7 @@ mod tests {
 
         // `--suggested` alone.
         assert_eq!(
-            modules(&install_deps(&tree, false, false, true)),
+            modules(&phase_deps(&tree, false, DepKinds::required(false, true))),
             [
                 "ExtUtils::MakeMaker",
                 "Carp",
@@ -1358,7 +1458,7 @@ mod tests {
 
         // Both, with `--no-test`: nothing from the test phase.
         assert_eq!(
-            modules(&install_deps(&tree, true, true, true)),
+            modules(&phase_deps(&tree, true, DepKinds::required(true, true))),
             [
                 "ExtUtils::MakeMaker",
                 "Carp",
@@ -1369,6 +1469,31 @@ mod tests {
                 "RunSug"
             ]
         );
+    }
+
+    #[test]
+    fn phase_deps_for_try_flags_selects_only_the_optional_relationships() {
+        let tree = sample_tree();
+        let kinds = |recommends, suggests| DepKinds {
+            requires: false,
+            recommends,
+            suggests,
+        };
+
+        // `--try-recommended`: recommends of every in-scope phase, no requires.
+        assert_eq!(
+            modules(&phase_deps(&tree, false, kinds(true, false))),
+            ["CfgRec", "BuildRec", "RunRec", "TestRec"]
+        );
+
+        // `--try-recommended --try-suggested`, with `--no-test`.
+        assert_eq!(
+            modules(&phase_deps(&tree, true, kinds(true, true))),
+            ["CfgRec", "BuildRec", "RunRec", "CfgSug", "RunSug"]
+        );
+
+        // Neither: nothing.
+        assert!(phase_deps(&tree, false, kinds(false, false)).is_empty());
     }
 
     // -- run id / cache layout -------------------------------------------

@@ -186,6 +186,27 @@ upt perl default
 upt perl default --json
 ```
 
+### `upt perl info`
+
+Show every setting of one `[perl.<name>]` section — a `Field` / `Value`
+table by default, or a JSON object with `--json`.
+
+```
+upt perl info [--perl <name>] [--json]
+```
+
+* `--perl <name>` selects the section. Without it, the `perl.default`
+  section is shown (an error if `perl.default` is unset).
+* Unset optional settings render as a fallback note in the table
+  (`(first perl on PATH)`, `(none)`, …) and as `null` / `[]` in JSON.
+* `--json` (`-j`) keys: `name`, `default` (bool), `perl`, `make`,
+  `install-base`, `lib` (array).
+
+```sh
+upt perl info
+upt perl info --perl dev --json
+```
+
 [perl-wrapper]: https://github.com/uperl/rust-perl-wrapper
 
 ## External commands

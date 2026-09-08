@@ -17,14 +17,18 @@
 //!   `[perl.<name>]`.
 //! * `upt perl list [--json]` prints the configured `[perl.<name>]` names.
 //! * `upt perl default [--json]` prints the name of `perl.default`.
+//! * `upt perl info [--perl <name>] [--json]` shows every setting of one
+//!   `[perl.<name>]` section, as a table or JSON.
 
 use std::ffi::OsString;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
+use comfy_table::{Attribute, Cell, ContentArrangement, Table, presets::UTF8_FULL};
 use perl_wrapper::Perl;
-use serde_json::Value;
+use serde_json::{Value, json as jsonv};
 
 use crate::config::PerlConfig;
 use crate::json;
@@ -54,6 +58,7 @@ pub fn run(cx: &crate::Cx, args: &[String]) -> Result<i32> {
         Command::Select { perl } => select(cx, &perl),
         Command::List { json } => list(cx, json),
         Command::Default { json } => default(cx, json),
+        Command::Info { perl, json } => info(cx, perl.as_deref(), json),
     }
 }
 
@@ -143,11 +148,26 @@ enum Command {
         #[arg(long, short = 'j')]
         json: bool,
     },
+
+    /// Show every setting of one `[perl.<name>]` section.
+    ///
+    /// With no `--perl`, the `perl.default` section is shown. The output is a
+    /// table by default, or a JSON object with `--json`.
+    Info {
+        /// Name of the `[perl.<name>]` section to show (default:
+        /// `perl.default`).
+        #[arg(long, value_name = "NAME")]
+        perl: Option<String>,
+
+        /// Print the settings as a JSON object instead of a table.
+        #[arg(long, short = 'j')]
+        json: bool,
+    },
 }
 
-/// Resolve the perl name, build its wrapper, and exec `perl` with `perl_args`.
-/// Returns `perl`'s exit status as this process's exit code.
-fn exec(cx: &crate::Cx, name: Option<&str>, perl_args: &[String]) -> Result<i32> {
+/// Resolve a `--perl <name>` (or `perl.default` when `None`) to its config
+/// section, returning the resolved name alongside it.
+fn resolve_perl<'a>(cx: &'a crate::Cx, name: Option<&'a str>) -> Result<(&'a str, &'a PerlConfig)> {
     let name = match name {
         Some(name) => name,
         None => cx.perl.default.as_deref().ok_or_else(|| {
@@ -165,6 +185,14 @@ fn exec(cx: &crate::Cx, name: Option<&str>, perl_args: &[String]) -> Result<i32>
             available(cx)
         )
     })?;
+
+    Ok((name, config))
+}
+
+/// Resolve the perl name, build its wrapper, and exec `perl` with `perl_args`.
+/// Returns `perl`'s exit status as this process's exit code.
+fn exec(cx: &crate::Cx, name: Option<&str>, perl_args: &[String]) -> Result<i32> {
+    let (name, config) = resolve_perl(cx, name)?;
 
     let perl = build_wrapper(config)
         .with_context(|| format!("building the perl-wrapper for `[perl.{name}]`"))?;
@@ -271,6 +299,100 @@ fn default(cx: &crate::Cx, as_json: bool) -> Result<i32> {
     })?;
     print!("{}", render_list(&[name], as_json, cx.style.enabled()));
     Ok(0)
+}
+
+/// `upt perl info`: show every setting of one `[perl.<name>]` section, as a
+/// table or (with `--json`) a JSON object.
+fn info(cx: &crate::Cx, name: Option<&str>, as_json: bool) -> Result<i32> {
+    let (name, config) = resolve_perl(cx, name)?;
+    let is_default = cx.perl.default.as_deref() == Some(name);
+
+    if as_json {
+        print!(
+            "{}",
+            json::to_string(&info_json(name, is_default, config), cx.style.enabled())
+        );
+    } else {
+        println!(
+            "{}",
+            info_table(name, is_default, config, cx.style.enabled())
+        );
+    }
+    Ok(0)
+}
+
+/// A `[perl.<name>]` section as a JSON object. Unset optional paths are `null`;
+/// `lib` is always an array.
+fn info_json(name: &str, is_default: bool, config: &PerlConfig) -> Value {
+    let path = |p: &Option<PathBuf>| match p {
+        Some(p) => Value::String(p.to_string_lossy().into_owned()),
+        None => Value::Null,
+    };
+    jsonv!({
+        "name": name,
+        "default": is_default,
+        "perl": path(&config.perl),
+        "make": path(&config.make),
+        "install-base": path(&config.install_base),
+        "lib": config
+            .lib
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// A `[perl.<name>]` section as a two-column "Field / Value" table. Unset
+/// optional settings show a parenthesised note describing the fallback.
+fn info_table(name: &str, is_default: bool, config: &PerlConfig, color: bool) -> String {
+    let path = |p: &Option<PathBuf>, fallback: &str| match p {
+        Some(p) => p.to_string_lossy().into_owned(),
+        None => fallback.to_string(),
+    };
+    let lib = if config.lib.is_empty() {
+        "(none)".to_string()
+    } else {
+        config
+            .lib
+            .iter()
+            .map(|p| p.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let rows = [
+        ("name", name.to_string()),
+        ("default", if is_default { "yes" } else { "no" }.to_string()),
+        ("perl", path(&config.perl, "(first perl on PATH)")),
+        ("make", path(&config.make, "(first make on PATH)")),
+        (
+            "install-base",
+            path(&config.install_base, "(interpreter default)"),
+        ),
+        ("lib", lib),
+    ];
+
+    // Same house style as `upt metacpan`: a full UTF-8 box that reads the
+    // terminal width itself, with a fixed fallback when stdout is not a TTY.
+    let mut t = Table::new();
+    t.load_preset(UTF8_FULL);
+    t.set_content_arrangement(ContentArrangement::Dynamic);
+    if !std::io::stdout().is_terminal() {
+        t.set_width(100);
+    }
+    let head = |s: &str| {
+        let cell = Cell::new(s);
+        if color {
+            cell.add_attribute(Attribute::Bold)
+        } else {
+            cell
+        }
+    };
+    t.set_header(vec![head("Field"), head("Value")]);
+    for (k, v) in rows {
+        t.add_row(vec![Cell::new(k), Cell::new(v)]);
+    }
+    t.to_string()
 }
 
 /// Format the perl-name list: a JSON array of strings when `as_json`, otherwise
@@ -685,6 +807,77 @@ mod tests {
         };
         let cx = cx_with(section);
         assert_eq!(default(&cx, false).unwrap(), 0);
+    }
+
+    fn full_config() -> PerlConfig {
+        PerlConfig {
+            perl: Some(PathBuf::from("/opt/perl/bin/perl")),
+            make: Some(PathBuf::from("/usr/bin/gmake")),
+            install_base: Some(PathBuf::from("/home/me/perl5")),
+            lib: vec![PathBuf::from("/a"), PathBuf::from("/b")],
+        }
+    }
+
+    #[test]
+    fn info_json_reports_every_setting_and_the_default_flag() {
+        let v = info_json("dev", true, &full_config());
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "name": "dev",
+                "default": true,
+                "perl": "/opt/perl/bin/perl",
+                "make": "/usr/bin/gmake",
+                "install-base": "/home/me/perl5",
+                "lib": ["/a", "/b"],
+            })
+        );
+    }
+
+    #[test]
+    fn info_json_uses_null_for_unset_paths_and_an_empty_lib_array() {
+        let v = info_json("bare", false, &PerlConfig::default());
+        assert_eq!(v["default"], serde_json::json!(false));
+        assert_eq!(v["perl"], Value::Null);
+        assert_eq!(v["make"], Value::Null);
+        assert_eq!(v["install-base"], Value::Null);
+        assert_eq!(v["lib"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn info_table_shows_all_fields_with_fallback_notes() {
+        let bare = info_table("bare", false, &PerlConfig::default(), false);
+        assert!(bare.contains("name"));
+        assert!(bare.contains("install-base"));
+        assert!(bare.contains("(first perl on PATH)"), "{bare}");
+        assert!(bare.contains("(none)"), "{bare}");
+        assert!(bare.contains(" no "), "default flag: {bare}");
+
+        let full = info_table("dev", true, &full_config(), false);
+        assert!(full.contains("/opt/perl/bin/perl"), "{full}");
+        assert!(full.contains("/home/me/perl5"), "{full}");
+        assert!(full.contains(" yes "), "default flag: {full}");
+    }
+
+    #[test]
+    fn info_errors_on_an_unknown_perl_name() {
+        let mut section = crate::config::PerlSection::default();
+        section
+            .perls
+            .insert("alpha".to_string(), PerlConfig::default());
+        let cx = cx_with(section);
+
+        let err = info(&cx, Some("beta"), false).unwrap_err().to_string();
+        assert!(err.contains("[perl.beta]"), "{err}");
+        assert!(err.contains("available: alpha"), "{err}");
+    }
+
+    #[test]
+    fn info_without_perl_flag_needs_a_default() {
+        let cx = cx_with(crate::config::PerlSection::default());
+        let err = info(&cx, None, true).unwrap_err().to_string();
+        assert!(err.contains("--perl"), "{err}");
+        assert!(err.contains("perl.default"), "{err}");
     }
 
     #[test]

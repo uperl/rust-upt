@@ -1123,9 +1123,10 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "perl-build"
-version = "0.2.0"
-source = "git+https://github.com/uperl/rust-perl-build?tag=v0.2.0#d26b56917cb4fd8e38bd38d0fcfc283c133739ec"
+version = "0.2.1"
+source = "git+https://github.com/uperl/rust-perl-build?tag=v0.2.1#e0e6f0888f578484715578d9e7eaf52daeec5763"
 dependencies = [
+ "cpan-distribution-extractor",
  "log",
  "metacpan-api-modern",
  "patch-perl",

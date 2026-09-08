@@ -70,6 +70,17 @@ The interpreter to build with comes from a `[perl.<name>]` config section:
 `--perl <name>` selects it, and without it `perl.default` is used — the same
 resolution as [`upt perl exec`](#upt-perl).
 
+### `upt cpan install <SPEC>...`
+
+Install distributions from CPAN by name: resolve each `SPEC` (a module or
+distribution name) through MetaCPAN, download and unpack the release, then run
+the [`upt dist`](#upt-dist-step) pipeline through `install` on it. `--perl
+<name>` selects the interpreter to build with (without it, `perl.default`) and
+`--no-test` skips the test suite — the same options as `upt dist install`.
+
+*Work in progress:* only the command-line surface exists so far; running it
+reports that the installer is not built yet.
+
 ### `upt perl <SUBCOMMAND>`
 
 Run a configured `perl` and manage the named `perl-wrapper` configurations in
@@ -244,6 +255,12 @@ patch-perl = "auto"
 #   "mb"   - prefer `Build.PL` (Module::Build)
 #   "eumm" - prefer `Makefile.PL` (ExtUtils::MakeMaker)
 prefer = "auto"
+
+[cpan]
+# Where `upt cpan install` fetches releases from:
+#   "metacpan" - resolve and download through the MetaCPAN API
+#   "mirror"   - fetch from a configured CPAN mirror
+source = "metacpan"
 
 # Named perl-wrapper configurations for `upt perl`. Each [perl.<name>] table
 # builds one perl-wrapper object.

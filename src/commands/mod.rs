@@ -58,6 +58,13 @@ pub static BUILTINS: &[Builtin] = &[
         run: crate::dist::run,
     },
     Builtin {
+        name: "cpan",
+        summary: "Install distributions from CPAN by name",
+        legacy_name: None,
+        help: None,
+        run: crate::cpan::run,
+    },
+    Builtin {
         name: "perl",
         summary: "Run perl through a configured perl-wrapper",
         legacy_name: None,

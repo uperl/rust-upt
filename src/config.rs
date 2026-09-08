@@ -1,5 +1,5 @@
-//! The user config file: `config.toml` with `[global]`, `[perlbuild]` and
-//! `[perl.<name>]` sections.
+//! The user config file: `config.toml` with `[global]`, `[perlbuild]`,
+//! `[dist]`, `[cpan]` and `[perl.<name>]` sections.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -41,6 +41,13 @@ patch-perl = "auto"
 # `upt dist --prefer <tool>` overrides this.
 prefer = "auto"
 
+# The [cpan] section configures `upt cpan`.
+[cpan]
+# Where `upt cpan install` fetches releases from:
+#   "metacpan" - resolve and download through the MetaCPAN API
+#   "mirror"   - fetch from a configured CPAN mirror
+source = "metacpan"
+
 # The [perl] section defines named perl-wrapper configurations for
 # `upt perl exec`. Each [perl.<name>] table builds one perl-wrapper object:
 #
@@ -70,6 +77,8 @@ pub struct Config {
     pub perlbuild: Perlbuild,
     #[serde(default)]
     pub dist: Dist,
+    #[serde(default)]
+    pub cpan: Cpan,
     #[serde(default)]
     pub perl: PerlSection,
 }
@@ -114,6 +123,26 @@ pub enum DistPrefer {
     Mb,
     /// Prefer `Makefile.PL` (`ExtUtils::MakeMaker`).
     Eumm,
+}
+
+/// The `[cpan]` section: settings for `upt cpan`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Cpan {
+    /// Where `upt cpan install` fetches releases from.
+    #[serde(default)]
+    pub source: CpanSource,
+}
+
+/// Value of `cpan.source`: where `upt cpan install` gets releases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CpanSource {
+    /// Resolve and download through the MetaCPAN API.
+    #[default]
+    Metacpan,
+    /// Fetch from a configured CPAN mirror.
+    Mirror,
 }
 
 /// The `[perl]` section: named `perl-wrapper` configurations for `upt perl
@@ -216,6 +245,31 @@ mod tests {
         assert_eq!(cfg.global.color, ColorChoice::Auto);
         assert_eq!(cfg.perlbuild.patch_perl, PatchPerlMode::Auto);
         assert_eq!(cfg.dist.prefer, DistPrefer::Auto);
+        assert_eq!(cfg.cpan.source, CpanSource::Metacpan);
+    }
+
+    #[test]
+    fn reads_cpan_source() {
+        let cfg: Config = toml::from_str("[cpan]\nsource = \"mirror\"\n").unwrap();
+        assert_eq!(cfg.cpan.source, CpanSource::Mirror);
+        assert_eq!(
+            toml::from_str::<Config>("[cpan]\nsource = \"metacpan\"\n")
+                .unwrap()
+                .cpan
+                .source,
+            CpanSource::Metacpan
+        );
+        // Absent section / key defaults to `metacpan`.
+        assert_eq!(
+            toml::from_str::<Config>("").unwrap().cpan.source,
+            CpanSource::Metacpan
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_cpan_source() {
+        assert!(toml::from_str::<Config>("[cpan]\nsource = \"cpanm\"\n").is_err());
+        assert!(toml::from_str::<Config>("[cpan]\nbogus = \"mirror\"\n").is_err());
     }
 
     #[test]

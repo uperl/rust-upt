@@ -11,6 +11,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 mod commands;
 mod config;
+mod cpan;
 mod db;
 mod dist;
 mod external;
@@ -23,7 +24,7 @@ mod perl;
 mod perlbuild;
 mod style;
 
-use config::{ColorChoice, Config, DistPrefer, PatchPerlMode, PerlSection};
+use config::{ColorChoice, Config, CpanSource, DistPrefer, PatchPerlMode, PerlSection};
 use style::Style;
 
 /// Prefix for external subcommand executables: `upt foo` -> `upt-foo`.
@@ -48,6 +49,9 @@ pub struct Cx {
     /// `dist.prefer` from the config: which build tool `upt dist` prefers for a
     /// dual-config distribution, unless `--prefer` overrides it.
     pub dist_prefer: DistPrefer,
+    /// `cpan.source` from the config: where `upt cpan install` fetches releases
+    /// from.
+    pub cpan_source: CpanSource,
     /// The `[perl]` config section: named `perl-wrapper` configurations and the
     /// default one, used by `upt perl exec`.
     pub perl: PerlSection,
@@ -174,6 +178,7 @@ fn build_cx(config_override: Option<PathBuf>, color_override: Option<ColorChoice
         database_path,
         patch_perl: config.perlbuild.patch_perl,
         dist_prefer: config.dist.prefer,
+        cpan_source: config.cpan.source,
         perl: config.perl,
     })
 }

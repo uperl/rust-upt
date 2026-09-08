@@ -78,6 +78,11 @@ the [`upt dist`](#upt-dist-step) pipeline through `install` on it. `--perl
 <name>` selects the interpreter to build with (without it, `perl.default`) and
 `--no-test` skips the test suite — the same options as `upt dist install`.
 
+The `[cpan]` config section supplies the defaults; `--source <metacpan|mirror>`,
+`--metacpan-base-url <url>` and `--mirror-base-url <url>` override
+`cpan.source`, `cpan.metacpan-base-url` and `cpan.mirror-base-url` for a single
+invocation.
+
 *Work in progress:* only the command-line surface exists so far; running it
 reports that the installer is not built yet.
 

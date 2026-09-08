@@ -27,7 +27,8 @@ pub struct Builtin {
     pub run: fn(&Cx, &[String]) -> Result<i32>,
 }
 
-/// Every built-in, in the order `upt help` lists them.
+/// Every built-in. `upt help` sorts these by name for display; the order here
+/// is not significant.
 pub static BUILTINS: &[Builtin] = &[
     Builtin {
         name: "help",

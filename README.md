@@ -74,17 +74,28 @@ resolution as [`upt perl exec`](#upt-perl).
 
 Install distributions from CPAN by name: resolve each `SPEC` (a module or
 distribution name) through MetaCPAN, download and unpack the release, then run
-the [`upt dist`](#upt-dist-step) pipeline through `install` on it. `--perl
-<name>` selects the interpreter to build with (without it, `perl.default`) and
-`--no-test` skips the test suite — the same options as `upt dist install`.
+the [`upt dist`](#upt-dist-step) pipeline (`pre-configure` → `configure` →
+`build` → `test` → `install`) on it, recursively installing any missing hard
+(`requires`) prerequisites discovered at the `pre-configure` and `configure`
+steps. `--perl <name>` selects the interpreter to build with (without it,
+`perl.default`); `--no-test` (alias `--no-tests`) skips the test suite and does
+not install `test`-phase prerequisites.
 
 The `[cpan]` config section supplies the defaults; `--source <metacpan|mirror>`,
 `--metacpan-base-url <url>` and `--mirror-base-url <url>` override
 `cpan.source`, `cpan.metacpan-base-url` and `cpan.mirror-base-url` for a single
 invocation.
 
-*Work in progress:* only the command-line surface exists so far; running it
-reports that the installer is not built yet.
+stdout stays terse — one line per step per distribution, plus the missing
+prerequisites listed at `pre-configure` and `configure`. Everything else goes
+under a per-run cache directory `<cache>/upt/cpan/<run-id>/` (`<run-id>` is a
+UTC timestamp, so runs sort oldest-first; a `latest` symlink points at the
+newest where symlinks are supported):
+
+* `install.log` — the merged raw output of every build step.
+* `<dist>-<version>/` — the unpacked tarball.
+* `<dist>-<version>.<step>.json` — written as each step completes, with the same
+  JSON body `upt dist <step> --json` produces.
 
 ### `upt perl <SUBCOMMAND>`
 

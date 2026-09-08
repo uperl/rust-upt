@@ -15,3 +15,5 @@
 .idea/
 
 /setup.sh
+
+*.swp

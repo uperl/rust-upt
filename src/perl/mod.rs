@@ -15,6 +15,7 @@
 //! * `upt perl select --perl <name>` points `perl.default` (the section
 //!   `upt perl exec` uses without `--perl`) at an already-registered
 //!   `[perl.<name>]`.
+//! * `upt perl list [--json]` prints the configured `[perl.<name>]` names.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -22,8 +23,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use perl_wrapper::Perl;
+use serde_json::Value;
 
 use crate::config::PerlConfig;
+use crate::json;
 
 /// Entry point for the `perl` built-in: parse `args` with clap, then dispatch.
 pub fn run(cx: &crate::Cx, args: &[String]) -> Result<i32> {
@@ -48,6 +51,7 @@ pub fn run(cx: &crate::Cx, args: &[String]) -> Result<i32> {
             lib,
         } => register(cx, &perl_bin, &perl, make, install_base, lib),
         Command::Select { perl } => select(cx, &perl),
+        Command::List { json } => list(cx, json),
     }
 }
 
@@ -117,6 +121,15 @@ enum Command {
         /// Name of the `[perl.<name>]` section to make the default.
         #[arg(long, value_name = "NAME", required = true)]
         perl: String,
+    },
+
+    /// List the names of the `[perl.<name>]` sections in the config file.
+    ///
+    /// Names are printed one per line, sorted. `perl.default` is not shown.
+    List {
+        /// Print the names as a JSON array of strings instead of one per line.
+        #[arg(long, short = 'j')]
+        json: bool,
     },
 }
 
@@ -225,6 +238,34 @@ fn select(cx: &crate::Cx, name: &str) -> Result<i32> {
         cx.config_path.display()
     );
     Ok(0)
+}
+
+/// `upt perl list`: print the configured perl names, one per line (or as a JSON
+/// array of strings with `--json`).
+fn list(cx: &crate::Cx, as_json: bool) -> Result<i32> {
+    let names: Vec<&str> = cx.perl.perls.keys().map(String::as_str).collect();
+    print!("{}", render_list(&names, as_json, cx.style.enabled()));
+    Ok(0)
+}
+
+/// Format the perl-name list: a JSON array of strings when `as_json`, otherwise
+/// one name per line. The plain form is empty when there are no perls; the JSON
+/// form is `[]`.
+fn render_list(names: &[&str], as_json: bool, color: bool) -> String {
+    if as_json {
+        let array = names
+            .iter()
+            .map(|n| Value::String((*n).to_owned()))
+            .collect();
+        json::to_string(&Value::Array(array), color)
+    } else {
+        let mut out = String::new();
+        for name in names {
+            out.push_str(name);
+            out.push('\n');
+        }
+        out
+    }
 }
 
 /// Read the current config file text, falling back to the starter template when
@@ -584,6 +625,20 @@ mod tests {
             cfg.perl.perls["dev"].perl.as_deref(),
             Some(Path::new("/dev"))
         );
+    }
+
+    #[test]
+    fn render_list_plain_is_one_sorted_name_per_line() {
+        assert_eq!(render_list(&["dev", "sys"], false, false), "dev\nsys\n");
+        assert_eq!(render_list(&[], false, false), "");
+    }
+
+    #[test]
+    fn render_list_json_is_an_array_of_strings() {
+        let out = render_list(&["dev", "sys"], true, false);
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v, serde_json::json!(["dev", "sys"]));
+        assert_eq!(render_list(&[], true, false).trim(), "[]");
     }
 
     #[test]

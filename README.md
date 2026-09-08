@@ -154,6 +154,22 @@ upt perl select --perl <name>
 upt perl select --perl dev
 ```
 
+### `upt perl list`
+
+List the names of the `[perl.<name>]` sections in the config file, one per
+line and sorted. `perl.default` is not shown.
+
+```
+upt perl list [--json]
+```
+
+* `--json` (`-j`) prints the names as a JSON array of strings instead.
+
+```sh
+upt perl list
+upt perl list --json
+```
+
 [perl-wrapper]: https://github.com/uperl/rust-perl-wrapper
 
 ## External commands

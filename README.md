@@ -79,7 +79,9 @@ distribution name), download and unpack the release, then run the
 prerequisites discovered at the `pre-configure` and `configure` steps. `--perl
 <name>` selects the interpreter to build with (without it, `perl.default`);
 `--no-test` (alias `--no-tests`) skips the test suite and does not install
-`test`-phase prerequisites.
+`test`-phase prerequisites. `--recommend` and `--suggest` (aliases
+`--recommends` / `--suggests`) also install the `recommends` and `suggests`
+prerequisites of every phase, recursively, as though they were `requires`.
 
 Resolution follows `cpan.source`. With `metacpan` (the default) each SPEC goes
 through the MetaCPAN `download_url` API. With `mirror`, the mirror's own index

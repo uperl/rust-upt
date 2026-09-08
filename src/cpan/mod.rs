@@ -12,6 +12,9 @@
 //!   (without it, `perl.default`), the same resolution as
 //!   [`upt perl exec`](crate::perl) and `upt dist`. `--no-test` installs
 //!   without running the test suite first, and skips `test`-phase prerequisites.
+//!   `--recommend` and `--suggest` additionally install the `recommends` and
+//!   `suggests` prerequisites of every phase, recursively, as though they were
+//!   `requires`.
 //!
 //! # Resolution
 //!
@@ -180,7 +183,8 @@ enum Command {
     /// Resolve each SPEC (through MetaCPAN, or the mirror's `02packages` index
     /// with `--source mirror`), download and unpack the release, and run the
     /// `dist` pipeline through `install` on it, recursively installing missing
-    /// `requires` prerequisites.
+    /// `requires` prerequisites (and `recommends` / `suggests` with
+    /// `--recommend` / `--suggest`).
     Install(InstallArgs),
 }
 
@@ -200,6 +204,20 @@ struct InstallArgs {
     /// `test`-phase prerequisites.
     #[arg(long = "no-test", visible_alias = "no-tests", short = 'n')]
     no_test: bool,
+
+    /// Also install `recommends` prerequisites, at every phase, as though they
+    /// were hard `requires`.
+    #[arg(
+        long = "recommend",
+        visible_alias = "recommends",
+        alias = "recommended"
+    )]
+    recommend: bool,
+
+    /// Also install `suggests` prerequisites, at every phase, as though they
+    /// were hard `requires`.
+    #[arg(long = "suggest", visible_alias = "suggests", alias = "suggested")]
+    suggest: bool,
 }
 
 /// `upt cpan install`: set up the run directory, then walk each SPEC through the
@@ -259,6 +277,8 @@ fn install(cx: &crate::Cx, common: &CommonArgs, args: InstallArgs) -> Result<i32
             perl,
             prefer,
             no_test: args.no_test,
+            recommend: args.recommend,
+            suggest: args.suggest,
             source: resolved.source,
             mirror_base_url: resolved.mirror_base_url,
             packages,
@@ -507,6 +527,12 @@ struct Installer {
     /// `None` means "the build library's own choice".
     prefer: Option<BuildTool>,
     no_test: bool,
+    /// Promote every phase's `recommends` prerequisites to install like a
+    /// `requires` (`--recommend`).
+    recommend: bool,
+    /// Promote every phase's `suggests` prerequisites to install like a
+    /// `requires` (`--suggest`).
+    suggest: bool,
     source: CpanSource,
     mirror_base_url: String,
     /// The mirror's `02packages.details.txt` index, loaded once when
@@ -691,21 +717,13 @@ impl Installer {
             .insert(distribution.to_string())
     }
 
-    /// The `requires` prerequisites from a resolved dependency tree that
-    /// `upt cpan` will try to install: `configure`, `build` and `runtime`
-    /// always, plus `test` unless `--no-test`.
+    /// The prerequisites from a resolved dependency tree that `upt cpan` will
+    /// try to install: the `requires` of `configure`, `build` and `runtime`
+    /// always, plus `test` unless `--no-test`; and, when `--recommend` /
+    /// `--suggest` are given, the `recommends` / `suggests` of those same phases
+    /// alongside them.
     fn resolved_requires<'a>(&self, tree: &'a Dependencies) -> Vec<&'a Dependency> {
-        let mut out: Vec<&Dependency> = tree
-            .configure
-            .requires
-            .iter()
-            .chain(&tree.build.requires)
-            .chain(&tree.runtime.requires)
-            .collect();
-        if !self.no_test {
-            out.extend(&tree.test.requires);
-        }
-        out
+        install_deps(tree, self.no_test, self.recommend, self.suggest)
     }
 
     /// The subset of `deps` that is not already satisfied on `perl`'s search
@@ -854,6 +872,40 @@ impl Installer {
             println!("{label}  {step}  missing: {}", format_missing(missing));
         }
     }
+}
+
+/// The prerequisites a resolved dependency `tree` contributes to an install
+/// run: the `requires` of `configure`, `build` and `runtime` (and `test` unless
+/// `no_test`), plus — when `recommend` / `suggest` is set — the `recommends` /
+/// `suggests` of those same phases, promoted to install like a `requires`.
+///
+/// `requires` come first and in phase order, so with both flags off this is
+/// exactly the old `configure`/`build`/`runtime`/`test` `requires` chain.
+fn install_deps(
+    tree: &Dependencies,
+    no_test: bool,
+    recommend: bool,
+    suggest: bool,
+) -> Vec<&Dependency> {
+    let mut phases = vec![&tree.configure, &tree.build, &tree.runtime];
+    if !no_test {
+        phases.push(&tree.test);
+    }
+    let mut out = Vec::new();
+    for phase in &phases {
+        out.extend(&phase.requires);
+    }
+    if recommend {
+        for phase in &phases {
+            out.extend(&phase.recommends);
+        }
+    }
+    if suggest {
+        for phase in &phases {
+            out.extend(&phase.suggests);
+        }
+    }
+    out
 }
 
 /// Create a unique run directory `base/<stamp>`, adding a `-NN` suffix if that
@@ -1148,6 +1200,7 @@ fn format_missing(missing: &[Dependency]) -> String {
 mod tests {
     use super::*;
     use clap::Parser;
+    use cpan_distribution_build::PhaseDependencies;
 
     fn parse(args: &[&str]) -> Cli {
         let argv: Vec<&str> = std::iter::once("upt cpan")
@@ -1194,6 +1247,22 @@ mod tests {
     }
 
     #[test]
+    fn install_accepts_recommend_and_suggest_flags() {
+        let args = install_args(&["install", "JSON::PP"]);
+        assert!(!args.recommend && !args.suggest);
+
+        let args = install_args(&["install", "--recommend", "--suggest", "JSON::PP"]);
+        assert!(args.recommend && args.suggest);
+
+        // Plural `--recommends` / `--suggests` and the `-ed` spellings are
+        // accepted as aliases.
+        assert!(install_args(&["install", "--recommends", "JSON::PP"]).recommend);
+        assert!(install_args(&["install", "--suggests", "JSON::PP"]).suggest);
+        assert!(install_args(&["install", "--recommended", "JSON::PP"]).recommend);
+        assert!(install_args(&["install", "--suggested", "JSON::PP"]).suggest);
+    }
+
+    #[test]
     fn source_and_url_overrides_parse_before_or_after_the_subcommand() {
         let before = parse(&[
             "--source",
@@ -1223,6 +1292,93 @@ mod tests {
     fn rejects_an_unknown_source_value() {
         assert!(
             Cli::try_parse_from(["upt cpan", "install", "JSON::PP", "--source", "cpanm"]).is_err()
+        );
+    }
+
+    // -- install dep selection ------------------------------------------
+
+    fn phase(requires: &[&str], recommends: &[&str], suggests: &[&str]) -> PhaseDependencies {
+        let list = |names: &[&str]| names.iter().map(|m| dep(m, "0")).collect();
+        PhaseDependencies {
+            requires: list(requires),
+            recommends: list(recommends),
+            suggests: list(suggests),
+            ..Default::default()
+        }
+    }
+
+    fn sample_tree() -> Dependencies {
+        Dependencies {
+            configure: phase(&["ExtUtils::MakeMaker"], &["CfgRec"], &["CfgSug"]),
+            build: phase(&[], &["BuildRec"], &[]),
+            test: phase(&["Test::More"], &["TestRec"], &["TestSug"]),
+            runtime: phase(&["Carp"], &["RunRec"], &["RunSug"]),
+            ..Default::default()
+        }
+    }
+
+    fn modules(deps: &[&Dependency]) -> Vec<String> {
+        deps.iter().map(|d| d.module.clone()).collect()
+    }
+
+    #[test]
+    fn install_deps_defaults_to_requires_in_phase_order() {
+        let tree = sample_tree();
+        // configure, build, runtime, then test.
+        assert_eq!(
+            modules(&install_deps(&tree, false, false, false)),
+            ["ExtUtils::MakeMaker", "Carp", "Test::More"]
+        );
+        // `--no-test` drops the whole test phase.
+        assert_eq!(
+            modules(&install_deps(&tree, true, false, false)),
+            ["ExtUtils::MakeMaker", "Carp"]
+        );
+    }
+
+    #[test]
+    fn install_deps_adds_recommends_and_suggests_when_asked() {
+        let tree = sample_tree();
+
+        // `--recommend`: every phase's `recommends`, after all the `requires`.
+        assert_eq!(
+            modules(&install_deps(&tree, false, true, false)),
+            [
+                "ExtUtils::MakeMaker",
+                "Carp",
+                "Test::More",
+                "CfgRec",
+                "BuildRec",
+                "RunRec",
+                "TestRec",
+            ]
+        );
+
+        // `--suggest` alone.
+        assert_eq!(
+            modules(&install_deps(&tree, false, false, true)),
+            [
+                "ExtUtils::MakeMaker",
+                "Carp",
+                "Test::More",
+                "CfgSug",
+                "RunSug",
+                "TestSug"
+            ]
+        );
+
+        // Both, with `--no-test`: nothing from the test phase.
+        assert_eq!(
+            modules(&install_deps(&tree, true, true, true)),
+            [
+                "ExtUtils::MakeMaker",
+                "Carp",
+                "CfgRec",
+                "BuildRec",
+                "RunRec",
+                "CfgSug",
+                "RunSug"
+            ]
         );
     }
 

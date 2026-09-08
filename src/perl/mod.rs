@@ -75,7 +75,10 @@ struct Cli {
     command: Command,
 }
 
+// `next_display_order = None` makes clap list the subcommands in `--help`
+// alphabetically rather than in declaration order, matching `upt help`.
 #[derive(Debug, Subcommand)]
+#[command(next_display_order = None)]
 enum Command {
     /// Execute `perl` using the `perl-wrapper` built from a `[perl.<name>]`
     /// config section.

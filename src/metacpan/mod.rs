@@ -146,7 +146,10 @@ impl From<PodFmt> for PodFormat {
     }
 }
 
+// `next_display_order = None`: list subcommands alphabetically in `--help`,
+// matching `upt help`.
 #[derive(Subcommand)]
+#[command(next_display_order = None)]
 enum CacheAction {
     /// Delete every cached response.
     Clear,
@@ -165,6 +168,7 @@ enum RiverSort {
 }
 
 #[derive(Subcommand)]
+#[command(next_display_order = None)]
 enum RiverAction {
     /// List a distribution's direct reverse dependencies, ordered by a CPAN
     /// River figure (transitive `total` by default), highest first.
@@ -207,6 +211,7 @@ enum RiverAction {
 }
 
 #[derive(Subcommand)]
+#[command(next_display_order = None)]
 enum PermissionsAction {
     /// PAUSE upload permissions for one or more module namespaces.
     ///
@@ -236,6 +241,7 @@ enum PermissionsAction {
 }
 
 #[derive(Subcommand)]
+#[command(next_display_order = None)]
 enum Command {
     /// Look up a CPAN author by PAUSE id.
     Author {

@@ -122,7 +122,10 @@ impl CommonArgs {
     }
 }
 
+// `next_display_order = None` makes clap list the subcommands in `--help`
+// alphabetically rather than in declaration order, matching `upt help`.
 #[derive(Debug, Subcommand)]
+#[command(next_display_order = None)]
 enum Command {
     /// Resolve each SPEC through MetaCPAN, download and unpack the release, and
     /// run the `dist` pipeline through `install` on it.

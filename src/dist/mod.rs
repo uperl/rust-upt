@@ -180,7 +180,10 @@ impl From<crate::config::DistPrefer> for Prefer {
     }
 }
 
+// `next_display_order = None` makes clap list the subcommands in `--help`
+// alphabetically rather than in declaration order, matching `upt help`.
 #[derive(Debug, Subcommand)]
+#[command(next_display_order = None)]
 enum Command {
     /// Print the prerequisites that must be installed before `configure` can run
     /// (the distribution's `configure` requires, plus the build tool itself), as
@@ -998,6 +1001,33 @@ mod tests {
     };
     use clap::Parser;
     use std::cmp::Ordering;
+
+    #[test]
+    fn help_lists_subcommands_alphabetically() {
+        use clap::CommandFactory;
+        let help = Cli::command().render_long_help().to_string();
+        let order = [
+            "build",
+            "clean",
+            "configure",
+            "distclean",
+            "install",
+            "pre-configure",
+            "test",
+        ];
+        let positions: Vec<usize> = order
+            .iter()
+            .map(|name| {
+                help.find(&format!("\n  {name} "))
+                    .or_else(|| help.find(&format!("\n  {name}\n")))
+                    .unwrap_or_else(|| panic!("`{name}` missing from help:\n{help}"))
+            })
+            .collect();
+        assert!(
+            positions.windows(2).all(|w| w[0] < w[1]),
+            "subcommands not in alphabetical order: {help}"
+        );
+    }
 
     #[test]
     fn install_runs_test_by_default_and_no_test_skips_it() {

@@ -236,6 +236,15 @@ color = "auto"
 #   "off"      - apply no fix-ups
 patch-perl = "auto"
 
+[dist]
+# Which build tool `upt dist` prefers for a distribution shipping BOTH
+# `Build.PL` and `Makefile.PL` (ignored otherwise); `upt dist --prefer`
+# overrides it:
+#   "auto" - follow the build library's own choice
+#   "mb"   - prefer `Build.PL` (Module::Build)
+#   "eumm" - prefer `Makefile.PL` (ExtUtils::MakeMaker)
+prefer = "auto"
+
 # Named perl-wrapper configurations for `upt perl`. Each [perl.<name>] table
 # builds one perl-wrapper object.
 [perl]

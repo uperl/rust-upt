@@ -618,6 +618,7 @@ mod tests {
             cache_dir: None,
             database_path: None,
             patch_perl: crate::config::PatchPerlMode::Auto,
+            dist_prefer: crate::config::DistPrefer::Auto,
             perl,
         }
     }

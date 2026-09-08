@@ -30,6 +30,11 @@
 //! `[perl.<name>]` config section, selected with `--perl <name>` or, without
 //! it, `perl.default` — the same resolution `upt perl exec` uses.
 //!
+//! For a distribution that ships both `Build.PL` and `Makefile.PL`, the build
+//! tool is chosen by `--prefer <auto|mb|eumm>`, or `dist.prefer` from the
+//! config when the flag is absent (default `auto`: the build library's own
+//! choice). It is ignored when the distribution ships only one.
+//!
 //! `pre-configure` and `configure` also print the prerequisites they compute:
 //! by default as a `comfy-table` in the same house style as the rest of `upt`,
 //! with an `installed` column giving each module's version on `dist.perl`'s
@@ -53,7 +58,7 @@ mod status;
 
 use std::ffi::OsString;
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -129,9 +134,10 @@ struct CommonArgs {
     perl: Option<String>,
 
     /// Which build tool to use when the distribution ships *both* `Build.PL` and
-    /// `Makefile.PL` (ignored when only one is present).
-    #[arg(long, global = true, value_name = "TOOL", default_value_t = Prefer::Mb)]
-    prefer: Prefer,
+    /// `Makefile.PL` (ignored when only one is present). Overrides `dist.prefer`
+    /// in the config; without either, `auto` (the build library's own choice).
+    #[arg(long, global = true, value_name = "TOOL")]
+    prefer: Option<Prefer>,
 
     /// Emit a single JSON object on stdout instead of tables and live output:
     /// the captured command `output`, plus `prereqs` for `pre-configure` and
@@ -140,30 +146,35 @@ struct CommonArgs {
     json: bool,
 }
 
-/// Build-tool preference for a dual-config distribution.
+/// Build-tool preference for a dual-config distribution (`--prefer`, or
+/// `dist.prefer` from the config).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Prefer {
-    /// `ExtUtils::MakeMaker` (`Makefile.PL`).
-    Eumm,
+    /// Follow the build library's own choice (currently `Module::Build`).
+    Auto,
     /// `Module::Build` (`Build.PL`).
     Mb,
+    /// `ExtUtils::MakeMaker` (`Makefile.PL`).
+    Eumm,
 }
 
 impl std::fmt::Display for Prefer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
-            Prefer::Eumm => "eumm",
+            Prefer::Auto => "auto",
             Prefer::Mb => "mb",
+            Prefer::Eumm => "eumm",
         };
         f.write_str(s)
     }
 }
 
-impl From<Prefer> for BuildTool {
-    fn from(prefer: Prefer) -> Self {
+impl From<crate::config::DistPrefer> for Prefer {
+    fn from(prefer: crate::config::DistPrefer) -> Self {
         match prefer {
-            Prefer::Eumm => BuildTool::Eumm,
-            Prefer::Mb => BuildTool::ModuleBuild,
+            crate::config::DistPrefer::Auto => Prefer::Auto,
+            crate::config::DistPrefer::Mb => Prefer::Mb,
+            crate::config::DistPrefer::Eumm => Prefer::Eumm,
         }
     }
 }
@@ -232,13 +243,10 @@ fn dispatch(cx: &crate::Cx, cli: Cli, color: bool) -> Result<i32> {
     let Cli { common, command } = cli;
 
     let perl = build_perl(cx, &common)?;
-    let mut dist = Distribution::with_preference(&common.directory, perl, common.prefer.into())
-        .with_context(|| {
-            format!(
-                "failed to open a CPAN distribution in {}",
-                common.directory.display()
-            )
-        })?;
+    // `--prefer` wins; without it, `dist.prefer` from the config (default
+    // `auto`).
+    let prefer = common.prefer.unwrap_or_else(|| cx.dist_prefer.into());
+    let mut dist = open_distribution(&common.directory, perl, prefer)?;
 
     // `dist_status` tracking: reconcile the row for this directory (and prune
     // rows for directories that have since been removed). Best effort — a
@@ -544,6 +552,18 @@ fn build_perl(cx: &crate::Cx, common: &CommonArgs) -> Result<Perl> {
     let (_name, config) = crate::perl::resolve_perl(cx, common.perl.as_deref())?;
     let perl = crate::perl::build_wrapper(config)?.with_capture_output(common.json);
     Ok(perl)
+}
+
+/// Open the distribution in `dir`, honouring the resolved build-tool
+/// preference. `Prefer::Auto` defers to the build library's own default;
+/// `Mb` / `Eumm` pin the tool for a distribution that ships both configs.
+fn open_distribution(dir: &Path, perl: Perl, prefer: Prefer) -> Result<Distribution> {
+    let opened = match prefer {
+        Prefer::Auto => Distribution::new(dir, perl),
+        Prefer::Mb => Distribution::with_preference(dir, perl, BuildTool::ModuleBuild),
+        Prefer::Eumm => Distribution::with_preference(dir, perl, BuildTool::Eumm),
+    };
+    opened.with_context(|| format!("failed to open a CPAN distribution in {}", dir.display()))
 }
 
 /// The pre-configure prerequisites as `{ "configure": [ { "module", "version" },
@@ -971,10 +991,37 @@ fn step_exit_code(step: &str, result: &ExecuteResult) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, Phase, chain_plan, cmp_versions, parse_perl_version, phase_name, version_satisfies,
+        Cli, Phase, Prefer, chain_plan, cmp_versions, parse_perl_version, phase_name,
+        version_satisfies,
     };
     use clap::Parser;
     use std::cmp::Ordering;
+
+    #[test]
+    fn prefer_is_optional_on_the_cli_and_maps_from_dist_prefer() {
+        // Not given -> None, so `dist.prefer` from the config decides.
+        assert_eq!(
+            Cli::try_parse_from(["upt dist", "build"])
+                .unwrap()
+                .common
+                .prefer,
+            None
+        );
+        assert_eq!(
+            Cli::try_parse_from(["upt dist", "--prefer", "eumm", "build"])
+                .unwrap()
+                .common
+                .prefer,
+            Some(Prefer::Eumm)
+        );
+        // `auto` is a valid `--prefer` value.
+        assert!(Cli::try_parse_from(["upt dist", "--prefer", "auto", "build"]).is_ok());
+
+        use crate::config::DistPrefer;
+        assert_eq!(Prefer::from(DistPrefer::Auto), Prefer::Auto);
+        assert_eq!(Prefer::from(DistPrefer::Mb), Prefer::Mb);
+        assert_eq!(Prefer::from(DistPrefer::Eumm), Prefer::Eumm);
+    }
 
     #[test]
     fn perl_flag_is_a_config_section_name_and_the_wrapper_knobs_are_gone() {

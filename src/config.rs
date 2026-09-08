@@ -31,6 +31,16 @@ color = "auto"
 #   "off"      - do not apply any fix-ups
 patch-perl = "auto"
 
+# The [dist] section configures `upt dist`.
+[dist]
+# Which build tool to prefer for a distribution that ships BOTH `Build.PL`
+# and `Makefile.PL` (ignored when only one is present):
+#   "auto" - follow the build library's own choice
+#   "mb"   - prefer `Build.PL` (Module::Build)
+#   "eumm" - prefer `Makefile.PL` (ExtUtils::MakeMaker)
+# `upt dist --prefer <tool>` overrides this.
+prefer = "auto"
+
 # The [perl] section defines named perl-wrapper configurations for
 # `upt perl exec`. Each [perl.<name>] table builds one perl-wrapper object:
 #
@@ -59,6 +69,8 @@ pub struct Config {
     #[serde(default)]
     pub perlbuild: Perlbuild,
     #[serde(default)]
+    pub dist: Dist,
+    #[serde(default)]
     pub perl: PerlSection,
 }
 
@@ -77,6 +89,31 @@ pub struct Perlbuild {
     /// How `upt perlbuild` applies Devel::PatchPerl fix-ups.
     #[serde(default, rename = "patch-perl")]
     pub patch_perl: PatchPerlMode,
+}
+
+/// The `[dist]` section: settings for `upt dist`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Dist {
+    /// Which build tool `upt dist` prefers for a distribution that ships both
+    /// `Build.PL` and `Makefile.PL`. `upt dist --prefer` overrides it.
+    #[serde(default)]
+    pub prefer: DistPrefer,
+}
+
+/// Value of `dist.prefer`: which build tool `upt dist` prefers when a
+/// distribution ships both `Build.PL` and `Makefile.PL` (ignored when only one
+/// is present).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DistPrefer {
+    /// Follow the build library's own choice (currently `Module::Build`).
+    #[default]
+    Auto,
+    /// Prefer `Build.PL` (`Module::Build`).
+    Mb,
+    /// Prefer `Makefile.PL` (`ExtUtils::MakeMaker`).
+    Eumm,
 }
 
 /// The `[perl]` section: named `perl-wrapper` configurations for `upt perl
@@ -178,6 +215,31 @@ mod tests {
         let cfg: Config = toml::from_str(DEFAULT_FILE).unwrap();
         assert_eq!(cfg.global.color, ColorChoice::Auto);
         assert_eq!(cfg.perlbuild.patch_perl, PatchPerlMode::Auto);
+        assert_eq!(cfg.dist.prefer, DistPrefer::Auto);
+    }
+
+    #[test]
+    fn reads_dist_prefer() {
+        let cfg: Config = toml::from_str("[dist]\nprefer = \"eumm\"\n").unwrap();
+        assert_eq!(cfg.dist.prefer, DistPrefer::Eumm);
+        assert_eq!(
+            toml::from_str::<Config>("[dist]\nprefer = \"mb\"\n")
+                .unwrap()
+                .dist
+                .prefer,
+            DistPrefer::Mb
+        );
+        // Absent section / key defaults to `auto`.
+        assert_eq!(
+            toml::from_str::<Config>("").unwrap().dist.prefer,
+            DistPrefer::Auto
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_dist_prefer() {
+        assert!(toml::from_str::<Config>("[dist]\nprefer = \"cmake\"\n").is_err());
+        assert!(toml::from_str::<Config>("[dist]\nbogus = \"mb\"\n").is_err());
     }
 
     #[test]

@@ -26,6 +26,10 @@
 //! output is therefore live; a failing step is reported as a non-zero exit,
 //! never as a panic.
 //!
+//! The interpreter (and its `make`, `install-base` and `lib`) comes from a
+//! `[perl.<name>]` config section, selected with `--perl <name>` or, without
+//! it, `perl.default` — the same resolution `upt perl exec` uses.
+//!
 //! `pre-configure` and `configure` also print the prerequisites they compute:
 //! by default as a `comfy-table` in the same house style as the rest of `upt`,
 //! with an `installed` column giving each module's version on `dist.perl`'s
@@ -118,23 +122,11 @@ struct CommonArgs {
     )]
     directory: PathBuf,
 
-    /// Perl interpreter to build with (default: the first `perl` on `PATH`).
-    #[arg(long, global = true, value_name = "PATH")]
-    perl: Option<PathBuf>,
-
-    /// `make` to use for `ExtUtils::MakeMaker` distributions (default: the first
-    /// `make` on `PATH`).
-    #[arg(long, global = true, value_name = "PATH")]
-    make: Option<PathBuf>,
-
-    /// Install newly built modules under this prefix, the way `local::lib` /
-    /// `INSTALL_BASE` would (default: the interpreter's own site directories).
-    #[arg(long, global = true, value_name = "DIR")]
-    install_base: Option<PathBuf>,
-
-    /// Directory to add to `PERL5LIB` when running build steps; repeatable.
-    #[arg(long = "lib", global = true, value_name = "DIR")]
-    lib: Vec<PathBuf>,
+    /// Name of the `[perl.<name>]` config section to build with (its `perl`,
+    /// `make`, `install-base` and `lib` settings). Without it, `perl.default`
+    /// is used.
+    #[arg(long, global = true, value_name = "NAME")]
+    perl: Option<String>,
 
     /// Which build tool to use when the distribution ships *both* `Build.PL` and
     /// `Makefile.PL` (ignored when only one is present).
@@ -239,7 +231,7 @@ enum Command {
 fn dispatch(cx: &crate::Cx, cli: Cli, color: bool) -> Result<i32> {
     let Cli { common, command } = cli;
 
-    let perl = build_perl(&common)?;
+    let perl = build_perl(cx, &common)?;
     let mut dist = Distribution::with_preference(&common.directory, perl, common.prefer.into())
         .with_context(|| {
             format!(
@@ -544,27 +536,13 @@ fn captured_output(result: &ExecuteResult) -> String {
         .unwrap_or_default()
 }
 
-/// Assemble the [`Perl`] wrapper from the shared options. Command output is
-/// captured (rather than inherited) when `--json` is in effect, so it can be
-/// folded into the JSON envelope.
-fn build_perl(common: &CommonArgs) -> Result<Perl> {
-    let mut perl = match &common.perl {
-        Some(path) => Perl::with_perl(path),
-        None => Perl::new().context("could not locate a `perl` interpreter on PATH")?,
-    };
-
-    perl = perl.with_capture_output(common.json);
-
-    if let Some(make) = &common.make {
-        perl = perl.with_make(make);
-    }
-    if let Some(base) = &common.install_base {
-        perl = perl.with_install_base(base);
-    }
-    if !common.lib.is_empty() {
-        perl = perl.with_lib(common.lib.clone());
-    }
-
+/// Assemble the [`Perl`] wrapper from the `[perl.<name>]` config section named
+/// by `--perl` (or `perl.default`), the same way `upt perl exec` does. Command
+/// output is captured (rather than inherited) when `--json` is in effect, so it
+/// can be folded into the JSON envelope.
+fn build_perl(cx: &crate::Cx, common: &CommonArgs) -> Result<Perl> {
+    let (_name, config) = crate::perl::resolve_perl(cx, common.perl.as_deref())?;
+    let perl = crate::perl::build_wrapper(config)?.with_capture_output(common.json);
     Ok(perl)
 }
 
@@ -993,9 +971,26 @@ fn step_exit_code(step: &str, result: &ExecuteResult) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Phase, chain_plan, cmp_versions, parse_perl_version, phase_name, version_satisfies,
+        Cli, Phase, chain_plan, cmp_versions, parse_perl_version, phase_name, version_satisfies,
     };
+    use clap::Parser;
     use std::cmp::Ordering;
+
+    #[test]
+    fn perl_flag_is_a_config_section_name_and_the_wrapper_knobs_are_gone() {
+        let cli = Cli::try_parse_from(["upt dist", "--perl", "dev", "build"]).unwrap();
+        assert_eq!(cli.common.perl.as_deref(), Some("dev"));
+
+        // `--make` / `--install-base` / `--lib` moved into the [perl.<name>]
+        // config section, so `upt dist` no longer accepts them.
+        for flag in [["--make", "m"], ["--install-base", "d"], ["--lib", "d"]] {
+            assert!(
+                Cli::try_parse_from(["upt dist", flag[0], flag[1], "build"]).is_err(),
+                "{} should be rejected",
+                flag[0]
+            );
+        }
+    }
 
     fn plan_names(target: Phase, install_needs_test: bool) -> Vec<&'static str> {
         chain_plan(target, install_needs_test)

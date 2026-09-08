@@ -166,8 +166,12 @@ enum Command {
 }
 
 /// Resolve a `--perl <name>` (or `perl.default` when `None`) to its config
-/// section, returning the resolved name alongside it.
-fn resolve_perl<'a>(cx: &'a crate::Cx, name: Option<&'a str>) -> Result<(&'a str, &'a PerlConfig)> {
+/// section, returning the resolved name alongside it. Shared with `upt dist`,
+/// which selects its build interpreter the same way.
+pub(crate) fn resolve_perl<'a>(
+    cx: &'a crate::Cx,
+    name: Option<&'a str>,
+) -> Result<(&'a str, &'a PerlConfig)> {
     let name = match name {
         Some(name) => name,
         None => cx.perl.default.as_deref().ok_or_else(|| {
@@ -554,8 +558,8 @@ fn path_str(path: &Path) -> String {
 }
 
 /// Build a [`Perl`] wrapper from a `[perl.<name>]` config section. A missing
-/// `perl` key falls back to the first `perl` on `PATH`.
-fn build_wrapper(config: &PerlConfig) -> Result<Perl> {
+/// `perl` key falls back to the first `perl` on `PATH`. Shared with `upt dist`.
+pub(crate) fn build_wrapper(config: &PerlConfig) -> Result<Perl> {
     let mut perl = match &config.perl {
         Some(path) => Perl::with_perl(path),
         None => Perl::new().context("could not locate a `perl` interpreter on PATH")?,

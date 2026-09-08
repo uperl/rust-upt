@@ -66,6 +66,10 @@ database, so re-running a step is cheap. `pre-configure` and `configure` also
 print a prerequisite table (only the unmet rows unless `--all-prereqs`).
 `--json` replaces the tables and live output with a single JSON envelope.
 
+The interpreter to build with comes from a `[perl.<name>]` config section:
+`--perl <name>` selects it, and without it `perl.default` is used — the same
+resolution as [`upt perl exec`](#upt-perl).
+
 ### `upt perl <SUBCOMMAND>`
 
 Run a configured `perl` and manage the named `perl-wrapper` configurations in

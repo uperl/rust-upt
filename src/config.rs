@@ -1,4 +1,5 @@
-//! The user config file: `config.toml` with a `[global]` section.
+//! The user config file: `config.toml` with `[global]` and `[perlbuild]`
+//! sections.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -18,6 +19,16 @@ pub const DEFAULT_FILE: &str = r#"# upt configuration.
 # Colorized terminal output: "always", "never", or "auto".
 # "auto" colorizes when stdout is a terminal and NO_COLOR is unset.
 color = "auto"
+
+# The [perlbuild] section configures `upt perlbuild`.
+[perlbuild]
+# How to apply Devel::PatchPerl fix-ups to the Perl source tree:
+#   "auto"     - the external `patchperl` if it is on PATH, otherwise the
+#                bundled patch-perl crate (in-process)
+#   "external" - only the external `patchperl`; warn and skip if it is missing
+#   "internal" - only the bundled patch-perl crate
+#   "off"      - do not apply any fix-ups
+patch-perl = "auto"
 "#;
 
 /// The parsed contents of `config.toml`.
@@ -26,6 +37,8 @@ color = "auto"
 pub struct Config {
     #[serde(default)]
     pub global: Global,
+    #[serde(default)]
+    pub perlbuild: Perlbuild,
 }
 
 /// The `[global]` section.
@@ -34,6 +47,33 @@ pub struct Config {
 pub struct Global {
     #[serde(default)]
     pub color: ColorChoice,
+}
+
+/// The `[perlbuild]` section: settings for `upt perlbuild`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Perlbuild {
+    /// How `upt perlbuild` applies Devel::PatchPerl fix-ups.
+    #[serde(default, rename = "patch-perl")]
+    pub patch_perl: PatchPerlMode,
+}
+
+/// Value of `perlbuild.patch-perl`: which Devel::PatchPerl implementation
+/// `upt perlbuild` uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PatchPerlMode {
+    /// The external `patchperl` when on `PATH`, otherwise the bundled
+    /// `patch-perl` crate.
+    #[default]
+    Auto,
+    /// Apply no fix-ups at all.
+    Off,
+    /// Always use the bundled `patch-perl` crate (in-process).
+    Internal,
+    /// Always use the external `patchperl` program; warn and skip patching if
+    /// it is not found.
+    External,
 }
 
 /// Value of `global.color`: whether to emit ANSI color escapes. The spellings
@@ -81,6 +121,24 @@ mod tests {
     fn starter_file_parses_and_matches_defaults() {
         let cfg: Config = toml::from_str(DEFAULT_FILE).unwrap();
         assert_eq!(cfg.global.color, ColorChoice::Auto);
+        assert_eq!(cfg.perlbuild.patch_perl, PatchPerlMode::Auto);
+    }
+
+    #[test]
+    fn reads_perlbuild_patch_perl() {
+        let cfg: Config = toml::from_str("[perlbuild]\npatch-perl = \"internal\"\n").unwrap();
+        assert_eq!(cfg.perlbuild.patch_perl, PatchPerlMode::Internal);
+        assert_eq!(
+            toml::from_str::<Config>("").unwrap().perlbuild.patch_perl,
+            PatchPerlMode::Auto
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_patch_perl() {
+        assert!(toml::from_str::<Config>("[perlbuild]\npatch-perl = \"maybe\"\n").is_err());
+        // The snake_case spelling is not accepted; the key is `patch-perl`.
+        assert!(toml::from_str::<Config>("[perlbuild]\npatch_perl = \"auto\"\n").is_err());
     }
 
     #[test]

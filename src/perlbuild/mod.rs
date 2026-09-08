@@ -24,7 +24,7 @@ use args::{BuildArgs, Outcome};
 const BLEAD_URL: &str = "https://github.com/Perl/perl5/archive/blead.tar.gz";
 
 /// Entry point for the `perlbuild` drop-in replacement.
-pub fn run(_cx: &crate::Cx, argv: &[String]) -> Result<i32> {
+pub fn run(cx: &crate::Cx, argv: &[String]) -> Result<i32> {
     // Surface the `perl-build` crate's `log` progress output; `RUST_LOG`
     // overrides the default. `try_init` so a second call in-process is a no-op.
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -49,7 +49,7 @@ pub fn run(_cx: &crate::Cx, argv: &[String]) -> Result<i32> {
             return Ok(0);
         }
         Outcome::Version => {
-            print_version();
+            print_version(cx.patch_perl);
             return Ok(0);
         }
         Outcome::Definitions => return block_on(definitions()),
@@ -64,7 +64,7 @@ pub fn run(_cx: &crate::Cx, argv: &[String]) -> Result<i32> {
         unsafe { std::env::set_var("PERL5_PATCHPERL_PLUGIN", plugin) };
     }
 
-    block_on(build(build_args))
+    block_on(build(build_args, cx.patch_perl))
 }
 
 /// Run `future` on a fresh current-thread Tokio runtime: `Ok(0)` on success,
@@ -81,7 +81,39 @@ where
     Ok(0)
 }
 
-async fn build(args: BuildArgs) -> Result<()> {
+/// How the Devel::PatchPerl fix-ups will be applied for this build.
+enum PatchStrategy {
+    /// Let `perl-build` drive the build, with this `patchperl` setting.
+    /// `PatchPerl::Auto` runs the external `patchperl` and warns+skips if it is
+    /// missing; `PatchPerl::Disabled` applies nothing.
+    PerlBuild(PatchPerl),
+    /// Obtain and unpack the source here, patch it in-process with the
+    /// `patch-perl` crate, then build the patched tree.
+    Internal,
+}
+
+/// Resolve `perlbuild.patch-perl` to a concrete strategy.
+fn patch_strategy(mode: crate::config::PatchPerlMode) -> PatchStrategy {
+    use crate::config::PatchPerlMode;
+    match mode {
+        PatchPerlMode::Off => PatchStrategy::PerlBuild(PatchPerl::Disabled),
+        PatchPerlMode::External => PatchStrategy::PerlBuild(PatchPerl::Auto),
+        PatchPerlMode::Internal => PatchStrategy::Internal,
+        PatchPerlMode::Auto => {
+            if which("patchperl").is_some() {
+                PatchStrategy::PerlBuild(PatchPerl::Auto)
+            } else {
+                log::warn!(
+                    "`patchperl` not found on PATH; applying Devel::PatchPerl fix-ups with the \
+                     bundled patch-perl crate"
+                );
+                PatchStrategy::Internal
+            }
+        }
+    }
+}
+
+async fn build(args: BuildArgs, mode: crate::config::PatchPerlMode) -> Result<()> {
     let BuildArgs {
         stuff,
         dest,
@@ -117,61 +149,61 @@ async fn build(args: BuildArgs) -> Result<()> {
         perl_build = perl_build.tarball_dir(tarball_dir);
     }
 
-    let built = if which("patchperl").is_some() {
-        // `patchperl` is on PATH — let `perl-build` drive the whole build; it
-        // shells out to `patchperl` for the Devel::PatchPerl fix-ups.
-        if is_blead {
-            perl_build
-                .install_from_url(BLEAD_URL)
-                .await
-                .context("build from blead failed")?
-        } else if is_url(&stuff) {
-            perl_build
-                .install_from_url(&stuff)
-                .await
-                .with_context(|| format!("build from {stuff} failed"))?
-        } else if is_tarball(&stuff) {
-            perl_build
-                .install_from_tarball(&stuff)
-                .with_context(|| format!("build from tarball {stuff} failed"))?
-        } else {
-            perl_build
-                .install_from_cpan(&stuff)
-                .await
-                .with_context(|| format!("build of perl {stuff} failed"))?
-        }
-    } else {
-        // No `patchperl` on PATH: obtain and unpack the source ourselves, apply
-        // the Devel::PatchPerl fix-ups in-process with the `patch-perl` crate,
-        // then build from the patched tree — no shelling out.
-        log::info!(
-            "`patchperl` not found on PATH; applying Devel::PatchPerl fix-ups with the \
-             bundled patch-perl crate"
-        );
-        perl_build = perl_build.patchperl(PatchPerl::Disabled);
-
-        let tarball = obtain_tarball(&stuff, is_blead, tarball_dir.as_deref())
-            .await
-            .with_context(|| format!("obtaining the source for {stuff}"))?;
-
-        let build_root = match &build_dir {
-            Some(dir) => {
-                std::fs::create_dir_all(dir).with_context(|| format!("creating {dir}"))?;
-                PathBuf::from(dir)
+    let built = match patch_strategy(mode) {
+        // `perl-build` drives the whole build; it applies (or skips) the
+        // Devel::PatchPerl fix-ups according to `setting`.
+        PatchStrategy::PerlBuild(setting) => {
+            perl_build = perl_build.patchperl(setting);
+            if is_blead {
+                perl_build
+                    .install_from_url(BLEAD_URL)
+                    .await
+                    .context("build from blead failed")?
+            } else if is_url(&stuff) {
+                perl_build
+                    .install_from_url(&stuff)
+                    .await
+                    .with_context(|| format!("build from {stuff} failed"))?
+            } else if is_tarball(&stuff) {
+                perl_build
+                    .install_from_tarball(&stuff)
+                    .with_context(|| format!("build from tarball {stuff} failed"))?
+            } else {
+                perl_build
+                    .install_from_cpan(&stuff)
+                    .await
+                    .with_context(|| format!("build of perl {stuff} failed"))?
             }
-            None => temp_dir("src").context("creating a build directory")?,
-        };
-        let src = extract_tarball(&tarball, &build_root)
-            .with_context(|| format!("unpacking {}", tarball.display()))?;
+        }
+        // Obtain and unpack the source ourselves, apply the fix-ups in-process
+        // with the `patch-perl` crate, then build from the patched tree — no
+        // shelling out.
+        PatchStrategy::Internal => {
+            perl_build = perl_build.patchperl(PatchPerl::Disabled);
 
-        patch_perl::PatchPerl::new()
-            .source(src.as_path())
-            .run()
-            .context("applying Devel::PatchPerl fix-ups")?;
+            let tarball = obtain_tarball(&stuff, is_blead, tarball_dir.as_deref())
+                .await
+                .with_context(|| format!("obtaining the source for {stuff}"))?;
 
-        perl_build
-            .install_from_source(&src)
-            .with_context(|| format!("build of {stuff} failed"))?
+            let build_root = match &build_dir {
+                Some(dir) => {
+                    std::fs::create_dir_all(dir).with_context(|| format!("creating {dir}"))?;
+                    PathBuf::from(dir)
+                }
+                None => temp_dir("src").context("creating a build directory")?,
+            };
+            let src = extract_tarball(&tarball, &build_root)
+                .with_context(|| format!("unpacking {}", tarball.display()))?;
+
+            patch_perl::PatchPerl::new()
+                .source(src.as_path())
+                .run()
+                .context("applying Devel::PatchPerl fix-ups")?;
+
+            perl_build
+                .install_from_source(&src)
+                .with_context(|| format!("build of {stuff} failed"))?
+        }
     };
 
     if want_symlinks {
@@ -319,17 +351,31 @@ fn prog() -> String {
     }
 }
 
-fn print_version() {
+fn print_version(mode: crate::config::PatchPerlMode) {
     let exe = std::env::current_exe()
         .ok()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| "?".to_string());
     println!("{} {} ({exe})", prog(), env!("CARGO_PKG_VERSION"));
     println!("backend: perl-build <https://github.com/uperl/rust-perl-build>");
-    println!("patch-perl: <https://github.com/uperl/rust-patch-perl> (bundled fallback)");
+    println!("         patch-perl <https://github.com/uperl/rust-patch-perl>");
+    println!(
+        "patch-perl mode: {} (config: perlbuild.patch-perl)",
+        mode_label(mode)
+    );
     match which("patchperl") {
-        Some(path) => println!("patchperl: {} (preferred when present)", path.display()),
-        None => println!("patchperl: not found on PATH — using the bundled patch-perl"),
+        Some(path) => println!("external patchperl: {}", path.display()),
+        None => println!("external patchperl: not found on PATH"),
+    }
+}
+
+fn mode_label(mode: crate::config::PatchPerlMode) -> &'static str {
+    use crate::config::PatchPerlMode;
+    match mode {
+        PatchPerlMode::Auto => "auto",
+        PatchPerlMode::Off => "off",
+        PatchPerlMode::Internal => "internal",
+        PatchPerlMode::External => "external",
     }
 }
 
@@ -386,10 +432,35 @@ OPTIONS:
     --version           print version information, then exit
     -h, --help          print this help, then exit
 
-Devel::PatchPerl fix-ups are applied through the `patchperl` program when it is
-on PATH; otherwise the bundled `patch-perl` crate applies them in-process, so
-no external `patchperl` is required.
+The `perlbuild.patch-perl` config item selects the Devel::PatchPerl
+implementation: `auto` (default) uses the external `patchperl` when on PATH and
+otherwise the bundled `patch-perl` crate in-process; `external` only ever runs
+`patchperl` (warns and skips if missing); `internal` only ever uses the crate;
+`off` applies no fix-ups.
 ",
         p = prog()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PatchStrategy, patch_strategy};
+    use crate::config::PatchPerlMode;
+    use perl_build::PatchPerl;
+
+    #[test]
+    fn explicit_modes_map_to_a_fixed_strategy() {
+        assert!(matches!(
+            patch_strategy(PatchPerlMode::Off),
+            PatchStrategy::PerlBuild(PatchPerl::Disabled)
+        ));
+        assert!(matches!(
+            patch_strategy(PatchPerlMode::External),
+            PatchStrategy::PerlBuild(PatchPerl::Auto)
+        ));
+        assert!(matches!(
+            patch_strategy(PatchPerlMode::Internal),
+            PatchStrategy::Internal
+        ));
+    }
 }

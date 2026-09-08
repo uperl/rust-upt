@@ -22,7 +22,7 @@ mod pathsearch;
 mod perlbuild;
 mod style;
 
-use config::{ColorChoice, Config};
+use config::{ColorChoice, Config, PatchPerlMode};
 use style::Style;
 
 /// Prefix for external subcommand executables: `upt foo` -> `upt-foo`.
@@ -41,6 +41,9 @@ pub struct Cx {
     /// directory cannot be determined. The file itself is not created until a
     /// subcommand calls [`Cx::open_db`].
     pub database_path: Option<PathBuf>,
+    /// `perlbuild.patch-perl` from the config: how `upt perlbuild` applies
+    /// Devel::PatchPerl fix-ups.
+    pub patch_perl: PatchPerlMode,
 }
 
 impl Cx {
@@ -162,6 +165,7 @@ fn build_cx(config_override: Option<PathBuf>, color_override: Option<ColorChoice
         config_path,
         cache_dir,
         database_path,
+        patch_perl: config.perlbuild.patch_perl,
     })
 }
 

@@ -3,20 +3,20 @@
 //!
 //! Each `[perl.<name>]` section of the config file describes one `perl-wrapper`
 //! object (which `perl` and `make` to use, the install prefix, the extra
-//! `PERL5LIB` directories). `upt perl exec` builds that wrapper and executes
-//! `perl` with it:
+//! `PERL5LIB` directories).
 //!
-//! ```text
-//! upt perl exec [--perl <name>] [-- <perl options>...]
-//! ```
-//!
-//! `--perl <name>` selects the `[perl.<name>]` section; without it, `perl.default`
-//! from the config is used. Everything after `--` is passed straight to `perl`;
-//! the command exits with `perl`'s own status.
+//! * `upt perl exec [--perl <name>] [-- <perl options>...]` builds that wrapper
+//!   and executes `perl` with it. `--perl <name>` selects the `[perl.<name>]`
+//!   section; without it, `perl.default` from the config is used. Everything
+//!   after `--` is passed straight to `perl`; the command exits with `perl`'s
+//!   own status.
+//! * `upt perl register <perl binary> --perl <name> [...]` adds a new
+//!   `[perl.<name>]` section to the config file.
 
 use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use perl_wrapper::Perl;
 
@@ -37,6 +37,13 @@ pub fn run(cx: &crate::Cx, args: &[String]) -> Result<i32> {
 
     match cli.command {
         Command::Exec { perl, perl_args } => exec(cx, perl.as_deref(), &perl_args),
+        Command::Register {
+            perl_bin,
+            perl,
+            make,
+            install_base,
+            lib,
+        } => register(cx, &perl_bin, &perl, make, install_base, lib),
     }
 }
 
@@ -70,6 +77,33 @@ enum Command {
         #[arg(last = true, value_name = "PERL_OPTIONS")]
         perl_args: Vec<String>,
     },
+
+    /// Add a new `[perl.<name>]` section to the config file.
+    ///
+    /// `--make` defaults to `$Config{make}` of the given interpreter. The name
+    /// given by `--perl` must not already be present in the config.
+    Register {
+        /// Full path to the `perl` binary to register.
+        #[arg(value_name = "PERL_BINARY")]
+        perl_bin: PathBuf,
+
+        /// Name for the new `[perl.<name>]` section (must not already be in
+        /// use).
+        #[arg(long, value_name = "NAME", required = true)]
+        perl: String,
+
+        /// Path to `make` (default: `$Config{make}` of the interpreter).
+        #[arg(long, value_name = "PATH")]
+        make: Option<PathBuf>,
+
+        /// `local::lib` / `INSTALL_BASE` prefix for newly built modules.
+        #[arg(long, value_name = "DIR")]
+        install_base: Option<PathBuf>,
+
+        /// Directory to prepend to `PERL5LIB`; repeatable.
+        #[arg(long = "lib", value_name = "DIR")]
+        lib: Vec<PathBuf>,
+    },
 }
 
 /// Resolve the perl name, build its wrapper, and exec `perl` with `perl_args`.
@@ -101,6 +135,162 @@ fn exec(cx: &crate::Cx, name: Option<&str>, perl_args: &[String]) -> Result<i32>
         .with_context(|| format!("running perl for `[perl.{name}]`"))?;
 
     Ok(exit_code(result.is_success, result.code))
+}
+
+/// The settings for a new `[perl.<name>]` section, with `--make` already
+/// resolved to a concrete path.
+struct RegisterEntry {
+    perl: PathBuf,
+    make: Option<PathBuf>,
+    install_base: Option<PathBuf>,
+    lib: Vec<PathBuf>,
+}
+
+/// `upt perl register`: add a `[perl.<name>]` section to the config file.
+fn register(
+    cx: &crate::Cx,
+    perl_bin: &Path,
+    name: &str,
+    make: Option<PathBuf>,
+    install_base: Option<PathBuf>,
+    lib: Vec<PathBuf>,
+) -> Result<i32> {
+    if name == "default" {
+        bail!("`default` is a reserved key in the [perl] section and cannot name a perl");
+    }
+    if cx.perl.perls.contains_key(name) {
+        bail!("`[perl.{name}]` is already in {}", cx.config_path.display());
+    }
+    if !perl_bin.is_file() {
+        bail!("{}: not a file", perl_bin.display());
+    }
+
+    // `--make`, or `$Config{make}` of the interpreter being registered.
+    let make = match make {
+        Some(make) => make,
+        None => config_make(perl_bin)?,
+    };
+
+    let entry = RegisterEntry {
+        perl: perl_bin.to_path_buf(),
+        make: Some(make),
+        install_base,
+        lib,
+    };
+
+    // Start from the current file (or the starter template when there is none)
+    // so comments and unrelated sections are preserved.
+    let base = match std::fs::read_to_string(&cx.config_path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            crate::config::DEFAULT_FILE.to_string()
+        }
+        Err(err) => {
+            return Err(anyhow::Error::new(err))
+                .with_context(|| format!("reading {}", cx.config_path.display()));
+        }
+    };
+
+    let updated = insert_perl_section(&base, name, &entry)?;
+
+    if let Some(parent) = cx.config_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&cx.config_path, updated)
+        .with_context(|| format!("writing {}", cx.config_path.display()))?;
+
+    println!("registered `[perl.{name}]` in {}", cx.config_path.display());
+    Ok(0)
+}
+
+/// Query `$Config{make}` from `perl_bin` (`perl -MConfig -e 'print
+/// $Config{make}'`).
+fn config_make(perl_bin: &Path) -> Result<PathBuf> {
+    let output = std::process::Command::new(perl_bin)
+        .args(["-MConfig", "-e", "print $Config{make}"])
+        .output()
+        .with_context(|| {
+            format!(
+                "running {} to read $Config{{make}}; pass --make explicitly to skip this",
+                perl_bin.display()
+            )
+        })?;
+
+    if !output.status.success() {
+        bail!(
+            "{} exited with {} while reading $Config{{make}}; pass --make explicitly",
+            perl_bin.display(),
+            output.status
+        );
+    }
+
+    let make = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if make.is_empty() {
+        bail!(
+            "{} reported an empty $Config{{make}}; pass --make explicitly",
+            perl_bin.display()
+        );
+    }
+    Ok(PathBuf::from(make))
+}
+
+/// Insert a `[perl.<name>]` table into the TOML document `base` (the current
+/// config file text, or the starter template when the file does not exist yet),
+/// returning the new file text. Comments and unrelated content are preserved.
+///
+/// Errors if `name` is the reserved `default` key or a `[perl.<name>]` table is
+/// already present.
+fn insert_perl_section(base: &str, name: &str, entry: &RegisterEntry) -> Result<String> {
+    use toml_edit::{Array, DocumentMut, Item, Table, value};
+
+    if name == "default" {
+        bail!("`default` is a reserved key in the [perl] section and cannot name a perl");
+    }
+
+    let mut doc: DocumentMut = base
+        .parse()
+        .context("the existing config file is not valid TOML")?;
+
+    if doc.get("perl").is_none() {
+        let mut table = Table::new();
+        // No bare `[perl]` header when it only holds sub-tables.
+        table.set_implicit(true);
+        doc.insert("perl", Item::Table(table));
+    }
+
+    let perl = doc["perl"]
+        .as_table_mut()
+        .context("the `perl` config entry is not a table")?;
+
+    if perl.contains_key(name) {
+        bail!("`[perl.{name}]` is already in the config file");
+    }
+
+    let mut table = Table::new();
+    table.insert("perl", value(path_str(&entry.perl)));
+    if let Some(make) = &entry.make {
+        table.insert("make", value(path_str(make)));
+    }
+    if let Some(install_base) = &entry.install_base {
+        table.insert("install-base", value(path_str(install_base)));
+    }
+    if !entry.lib.is_empty() {
+        let mut lib = Array::new();
+        for dir in &entry.lib {
+            lib.push(path_str(dir));
+        }
+        table.insert("lib", value(lib));
+    }
+
+    perl.insert(name, Item::Table(table));
+
+    Ok(doc.to_string())
+}
+
+/// A path as a UTF-8 string for storing in the TOML config (lossy, matching how
+/// the rest of `upt` treats config paths).
+fn path_str(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
 }
 
 /// Build a [`Perl`] wrapper from a `[perl.<name>]` config section. A missing
@@ -201,5 +391,92 @@ mod tests {
         assert_eq!(exit_code(false, Some(256)), 1);
         // Killed by a signal.
         assert_eq!(exit_code(false, None), 1);
+    }
+
+    fn entry(perl: &str) -> RegisterEntry {
+        RegisterEntry {
+            perl: PathBuf::from(perl),
+            make: None,
+            install_base: None,
+            lib: Vec::new(),
+        }
+    }
+
+    /// Parse `text` with the real config deserializer, so the test also checks
+    /// that `insert_perl_section` writes the key names the loader expects.
+    fn parse(text: &str) -> crate::config::Config {
+        toml::from_str(text).expect("insert_perl_section produced invalid config TOML")
+    }
+
+    #[test]
+    fn insert_adds_a_perl_table_and_keeps_existing_content() {
+        let base = "[global]\ncolor = \"never\"\n";
+        let mut e = entry("/opt/perl/bin/perl");
+        e.make = Some(PathBuf::from("/usr/bin/make"));
+        let out = insert_perl_section(base, "dev", &e).unwrap();
+
+        assert!(out.contains("[global]"), "unrelated section preserved");
+        let cfg = parse(&out);
+        let dev = &cfg.perl.perls["dev"];
+        assert_eq!(dev.perl.as_deref(), Some(Path::new("/opt/perl/bin/perl")));
+        assert_eq!(dev.make.as_deref(), Some(Path::new("/usr/bin/make")));
+        assert!(dev.install_base.is_none());
+        assert!(dev.lib.is_empty());
+    }
+
+    #[test]
+    fn insert_writes_install_base_and_a_repeatable_lib_array() {
+        let mut e = entry("/p");
+        e.install_base = Some(PathBuf::from("/base"));
+        e.lib = vec![PathBuf::from("/a"), PathBuf::from("/b")];
+        let out = insert_perl_section("", "x", &e).unwrap();
+
+        let cfg = parse(&out);
+        let x = &cfg.perl.perls["x"];
+        assert_eq!(x.install_base.as_deref(), Some(Path::new("/base")));
+        assert_eq!(x.lib, [PathBuf::from("/a"), PathBuf::from("/b")]);
+        assert!(x.make.is_none(), "no make key when --make was not resolved");
+    }
+
+    #[test]
+    fn insert_preserves_perl_default_and_sibling_entries() {
+        let base = "[perl]\ndefault = \"a\"\n\n[perl.a]\nperl = \"/a\"\n";
+        let out = insert_perl_section(base, "b", &entry("/b")).unwrap();
+
+        let cfg = parse(&out);
+        assert_eq!(cfg.perl.default.as_deref(), Some("a"));
+        assert!(cfg.perl.perls.contains_key("a"));
+        assert!(cfg.perl.perls.contains_key("b"));
+    }
+
+    #[test]
+    fn insert_rejects_a_name_already_in_the_file() {
+        let base = "[perl.dev]\nperl = \"/x\"\n";
+        let err = insert_perl_section(base, "dev", &entry("/y"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("already"), "{err}");
+    }
+
+    #[test]
+    fn insert_rejects_the_reserved_default_name() {
+        let err = insert_perl_section("", "default", &entry("/y"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("reserved"), "{err}");
+    }
+
+    #[test]
+    fn insert_into_the_starter_template_round_trips() {
+        let out =
+            insert_perl_section(crate::config::DEFAULT_FILE, "dev", &entry("/opt/perl")).unwrap();
+        let cfg = parse(&out);
+        assert_eq!(
+            cfg.perl.perls["dev"].perl.as_deref(),
+            Some(Path::new("/opt/perl"))
+        );
+        // The starter template's other sections still load.
+        assert_eq!(cfg.global.color, crate::config::ColorChoice::Auto);
+        assert_eq!(cfg.perlbuild.patch_perl, crate::config::PatchPerlMode::Auto);
     }
 }

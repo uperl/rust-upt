@@ -117,6 +117,26 @@ upt perl exec [--perl <name>] [-- <perl options>...]
 upt perl exec --perl dev -- -E 'say "$^X $]"'
 ```
 
+### `upt perl register`
+
+Add a new `[perl.<name>]` section to the config file (comments and other
+sections are preserved).
+
+```
+upt perl register <perl binary> --perl <name> [--make <path>]
+                   [--install-base <dir>] [--lib <dir>]...
+```
+
+* `--perl <name>` is required and must not already be a `[perl.<name>]` in the
+  config (nor the reserved name `default`).
+* `--make` defaults to `$Config{make}` of the given interpreter.
+* `--install-base` and `--lib` are optional; `--lib` may be repeated.
+
+```sh
+upt perl register /opt/perl-5.40/bin/perl --perl dev \
+    --install-base ~/perl5 --lib ~/code/lib
+```
+
 [perl-wrapper]: https://github.com/uperl/rust-perl-wrapper
 
 ## External commands

@@ -579,7 +579,7 @@ impl Installer {
         fs::write(&archive_path, &bytes)
             .with_context(|| format!("writing {}", archive_path.display()))?;
 
-        let extracted = perl_build::extract_tarball(&archive_path, &self.run_dir)
+        let extracted = cpan_distribution_extractor::extract(&archive_path, &self.run_dir)
             .with_context(|| format!("unpacking {}", archive_path.display()))?;
         let target = self.run_dir.join(&label);
         if extracted != target {

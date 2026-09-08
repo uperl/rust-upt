@@ -73,13 +73,20 @@ resolution as [`upt perl exec`](#upt-perl).
 ### `upt cpan install <SPEC>...`
 
 Install distributions from CPAN by name: resolve each `SPEC` (a module or
-distribution name) through MetaCPAN, download and unpack the release, then run
-the [`upt dist`](#upt-dist-step) pipeline (`pre-configure` → `configure` →
-`build` → `test` → `install`) on it, recursively installing any missing hard
-(`requires`) prerequisites discovered at the `pre-configure` and `configure`
-steps. `--perl <name>` selects the interpreter to build with (without it,
-`perl.default`); `--no-test` (alias `--no-tests`) skips the test suite and does
-not install `test`-phase prerequisites.
+distribution name), download and unpack the release, then run the
+[`upt dist`](#upt-dist-step) pipeline (`pre-configure` → `configure` → `build` →
+`test` → `install`) on it, recursively installing any missing hard (`requires`)
+prerequisites discovered at the `pre-configure` and `configure` steps. `--perl
+<name>` selects the interpreter to build with (without it, `perl.default`);
+`--no-test` (alias `--no-tests`) skips the test suite and does not install
+`test`-phase prerequisites.
+
+Resolution follows `cpan.source`. With `metacpan` (the default) each SPEC goes
+through the MetaCPAN `download_url` API. With `mirror`, the mirror's own index
+(`<mirror-base-url>/modules/02packages.details.txt.gz`) is fetched once and
+every SPEC — prerequisites included — is looked up there; tarballs come from
+`<mirror-base-url>/authors/id/...` and MetaCPAN is never contacted (the index
+has no checksums, so downloads are unverified in this mode).
 
 The `[cpan]` config section supplies the defaults; `--source <metacpan|mirror>`,
 `--metacpan-base-url <url>` and `--mirror-base-url <url>` override

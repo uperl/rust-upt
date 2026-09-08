@@ -1,11 +1,11 @@
 //! Integration test for `upt cpan install --source mirror`.
 //!
-//! A throwaway in-process HTTP server plays both the MetaCPAN API
-//! (`/download_url/<module>`) and the CPAN mirror (`/authors/id/...`), serving
-//! only `Acme-UPT-*` / `Acme::UPT::*` distributions built on the fly so nothing
-//! here can collide with real CPAN modules. The `download_url` responses point
-//! their `download_url` field at a dead host, so the run only succeeds if
-//! `--source mirror` actually rewrites the URL onto the mirror base.
+//! A throwaway in-process HTTP server plays a CPAN mirror: it serves a
+//! `modules/02packages.details.txt.gz` index and the `authors/id/...` tarballs
+//! for a handful of `Acme-UPT-*` / `Acme::UPT::*` distributions built on the
+//! fly, so nothing here can collide with real CPAN modules. `--metacpan-base-url`
+//! points at a dead host, so the run only succeeds if mirror mode resolves
+//! everything from the index without touching MetaCPAN.
 //!
 //! The `Acme-UPT-Top` distribution declares one prerequisite in each of the
 //! `configure`, `build`, `test` and `runtime` phases; the test checks that all
@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
-use sha2::{Digest, Sha256};
+use cpan_packagedetails::{Entry, PackageDetails};
 
 /// A self-deleting scratch directory under the system temp dir.
 struct TempDir(PathBuf);
@@ -95,6 +95,12 @@ impl MockDist {
         format!("{}-1.00.tar.gz", self.dist)
     }
 
+    /// The archive path relative to `authors/id/`, and the `path` column in
+    /// `02packages`.
+    fn author_rel_path(&self) -> String {
+        format!("A/AC/ACME/{}", self.archive_name())
+    }
+
     /// Write the distribution source tree under `parent/<dist>-1.00/`.
     fn write_tree(&self, parent: &Path) {
         let root = parent.join(self.dir_name());
@@ -152,43 +158,32 @@ impl MockDist {
     }
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+/// What the mock mirror serves.
+struct Mirror {
+    /// `modules/02packages.details.txt.gz` bytes.
+    index_gz: Vec<u8>,
+    /// archive base name -> tarball bytes.
+    archives: HashMap<String, Vec<u8>>,
 }
 
-/// Start the mock API+mirror on `127.0.0.1:0`; returns the bound port. The
-/// accept loop runs on a detached thread for the life of the test process.
-fn start_server(
-    download_url_json: HashMap<String, String>,
-    archives: HashMap<String, Vec<u8>>,
-) -> u16 {
+/// Start the mock mirror on `127.0.0.1:0`; returns the bound port. The accept
+/// loop runs on a detached thread for the life of the test process.
+fn start_server(mirror: Mirror) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
     let port = listener.local_addr().unwrap().port();
-    let json = Arc::new(download_url_json);
-    let archives = Arc::new(archives);
+    let mirror = Arc::new(mirror);
 
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
-            let json = Arc::clone(&json);
-            let archives = Arc::clone(&archives);
-            std::thread::spawn(move || handle(&mut stream, &json, &archives));
+            let mirror = Arc::clone(&mirror);
+            std::thread::spawn(move || handle(&mut stream, &mirror));
         }
     });
     port
 }
 
-fn handle(
-    stream: &mut TcpStream,
-    json: &HashMap<String, String>,
-    archives: &HashMap<String, Vec<u8>>,
-) {
+fn handle(stream: &mut TcpStream, mirror: &Mirror) {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
     loop {
@@ -208,15 +203,11 @@ fn handle(
         .and_then(|line| line.split(' ').nth(1))
         .unwrap_or("/");
 
-    if let Some(rest) = path.strip_prefix("/download_url/") {
-        let module = rest.replace("%3A", ":").replace("%3a", ":");
-        match json.get(&module) {
-            Some(body) => respond(stream, "200 OK", "application/json", body.as_bytes()),
-            None => respond(stream, "404 Not Found", "text/plain", b"unknown module"),
-        }
+    if path == "/modules/02packages.details.txt.gz" {
+        respond(stream, "200 OK", "application/gzip", &mirror.index_gz);
     } else if let Some(rest) = path.strip_prefix("/authors/id/") {
         let base = rest.rsplit('/').next().unwrap_or("");
-        match archives.get(base) {
+        match mirror.archives.get(base) {
             Some(bytes) => respond(stream, "200 OK", "application/gzip", bytes),
             None => respond(stream, "404 Not Found", "text/plain", b"unknown archive"),
         }
@@ -299,7 +290,7 @@ fn build_cmd(
     )
     .unwrap();
 
-    let base = format!("http://127.0.0.1:{port}/");
+    let mirror_base = format!("http://127.0.0.1:{port}/");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_upt"));
     cmd.args(["--config"]).arg(&config).args([
         "cpan",
@@ -308,10 +299,11 @@ fn build_cmd(
         "itest",
         "--source",
         source,
+        // A dead host: mirror mode must not touch MetaCPAN.
         "--metacpan-base-url",
-        &base,
+        "http://127.0.0.1:1/",
         "--mirror-base-url",
-        &base,
+        &mirror_base,
     ]);
     if no_test {
         cmd.arg("--no-test");
@@ -360,42 +352,39 @@ fn mirror_mode_installs_phase_deps_and_respects_no_test() {
     let src = tmp.path().join("src");
     std::fs::create_dir_all(&src).unwrap();
 
-    // Build every mock dist tree + tarball, and the matching download_url JSON.
-    // `download_url` points at a dead host (port 1); only the mirror rewrite
-    // makes the fetch reachable.
+    // Build every mock dist tree + tarball, and a `02packages` index pointing at
+    // each one under `authors/id/A/AC/ACME/`.
     let dists = mock_dists();
     let mut archives: HashMap<String, Vec<u8>> = HashMap::new();
-    let mut download_url_json: HashMap<String, String> = HashMap::new();
+    let mut index = PackageDetails::new();
     for dist in &dists {
         dist.write_tree(&src);
-        let bytes = dist.tarball(&src);
-        let sha = sha256_hex(&bytes);
-        let archive = dist.archive_name();
-        download_url_json.insert(
-            dist.module.clone(),
-            format!(
-                "{{\"download_url\":\"http://127.0.0.1:1/authors/id/A/AC/ACME/{archive}\",\
-                 \"version\":\"1.00\",\"release\":\"{}-1.00\",\"distribution\":\"{}\",\
-                 \"checksum_sha256\":\"{sha}\"}}",
-                dist.dist, dist.dist
-            ),
-        );
-        archives.insert(archive, bytes);
+        archives.insert(dist.archive_name(), dist.tarball(&src));
+        index
+            .add_entry(Entry::new(
+                dist.module.clone(),
+                Some("1.00".to_string()),
+                dist.author_rel_path(),
+            ))
+            .unwrap();
     }
+    let mirror = Mirror {
+        index_gz: index.to_gz_bytes().unwrap(),
+        archives,
+    };
+    let port = start_server(mirror);
 
-    let port = start_server(download_url_json, archives);
-
-    // --- sanity: `--source metacpan` follows the (dead) download_url host and
-    // cannot fetch anything, so only the mirror rewrite makes the rest work.
+    // --- sanity: `--source metacpan` points at a dead host and cannot resolve
+    // anything, so only mirror mode (the `02packages` index) makes this work.
     let (mut cmd, no_install, _) = build_cmd(tmp.path(), "metacpan", port, true, "metacpan");
     let out = cmd.output().expect("run upt cpan install (metacpan mode)");
     assert!(
         !out.status.success(),
-        "`--source metacpan` should fail against the dead download_url host"
+        "`--source metacpan` should fail against the dead MetaCPAN host"
     );
     assert!(
         !installed_module(&no_install, "Acme/UPT/Top.pm"),
-        "nothing is installed when the fetch fails"
+        "nothing is installed when resolution fails"
     );
 
     // --- with --no-test: the test-phase prerequisite must NOT be installed.

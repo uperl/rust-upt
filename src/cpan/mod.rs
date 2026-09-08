@@ -2,16 +2,29 @@
 //!
 //! Where [`upt dist`](crate::dist) drives the build lifecycle of an *already
 //! unpacked* distribution, `upt cpan` starts from a module or distribution
-//! name: resolve it through MetaCPAN, download and unpack the release, then run
-//! the `dist` pipeline (`pre-configure` … `install`) on it, recursively
-//! installing any missing hard (`requires`) prerequisites discovered at the
-//! `pre-configure` and `configure` steps.
+//! name: resolve it, download and unpack the release, then run the `dist`
+//! pipeline (`pre-configure` … `install`) on it, recursively installing any
+//! missing hard (`requires`) prerequisites discovered at the `pre-configure`
+//! and `configure` steps.
 //!
 //! * `upt cpan install <SPEC>...` installs one or more modules / distributions.
 //!   `--perl <name>` selects the `[perl.<name>]` config section to build with
 //!   (without it, `perl.default`), the same resolution as
 //!   [`upt perl exec`](crate::perl) and `upt dist`. `--no-test` installs
 //!   without running the test suite first, and skips `test`-phase prerequisites.
+//!
+//! # Resolution
+//!
+//! With `cpan.source = "metacpan"` (the default) each SPEC is resolved through
+//! the MetaCPAN `download_url` API and the tarball is fetched from the URL it
+//! hands back.
+//!
+//! With `cpan.source = "mirror"` the mirror's own package index
+//! (`<mirror-base-url>/modules/02packages.details.txt.gz`) is downloaded once
+//! and every SPEC — including recursively-discovered prerequisites — is looked
+//! up in it; the tarball is fetched from `<mirror-base-url>/authors/id/<path>`.
+//! MetaCPAN is not contacted. The index carries no checksums, so downloads are
+//! not verified in this mode.
 //!
 //! The `[cpan]` config section (`source`, `metacpan-base-url`,
 //! `mirror-base-url`) supplies the defaults; `--source`, `--metacpan-base-url`
@@ -48,6 +61,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use cpan_distribution_build::{
     BuildTool, Dependencies, Dependency, Distribution, ExecuteResult, Perl,
 };
+use cpan_packagedetails::PackageDetails;
 use metacpan_api_modern::Client;
 use metacpan_api_modern::types::{DownloadUrl, Release};
 use serde_json::{Map, Value, json};
@@ -159,9 +173,10 @@ impl CommonArgs {
 #[derive(Debug, Subcommand)]
 #[command(next_display_order = None)]
 enum Command {
-    /// Resolve each SPEC through MetaCPAN, download and unpack the release, and
-    /// run the `dist` pipeline through `install` on it, recursively installing
-    /// missing `requires` prerequisites.
+    /// Resolve each SPEC (through MetaCPAN, or the mirror's `02packages` index
+    /// with `--source mirror`), download and unpack the release, and run the
+    /// `dist` pipeline through `install` on it, recursively installing missing
+    /// `requires` prerequisites.
     Install(InstallArgs),
 }
 
@@ -207,23 +222,14 @@ fn install(cx: &crate::Cx, common: &CommonArgs, args: InstallArgs) -> Result<i32
         crate::config::DistPrefer::Eumm => Some(BuildTool::Eumm),
     };
 
-    let installer = Installer {
-        log_path: run_dir.join("install.log"),
-        run_dir,
-        perl,
-        prefer,
-        no_test: args.no_test,
-        source: resolved.source,
-        mirror_base_url: resolved.mirror_base_url.clone(),
-        started: Mutex::new(HashSet::new()),
-    };
+    let log_path = run_dir.join("install.log");
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("starting the async runtime")?;
 
-    runtime.block_on(async {
+    runtime.block_on(async move {
         let mut client = Client::builder()
             .user_agent(USER_AGENT)
             .base_url(resolved.metacpan_base_url.clone());
@@ -232,14 +238,60 @@ fn install(cx: &crate::Cx, common: &CommonArgs, args: InstallArgs) -> Result<i32
         }
         let client = client.build().context("building the MetaCPAN client")?;
 
+        // In mirror mode, pull the mirror's package index once and resolve
+        // everything against it.
+        let packages = match resolved.source {
+            CpanSource::Metacpan => None,
+            CpanSource::Mirror => Some(
+                load_mirror_index(&client, &resolved.mirror_base_url)
+                    .await
+                    .context("loading the mirror package index")?,
+            ),
+        };
+
+        let installer = Installer {
+            log_path,
+            run_dir,
+            perl,
+            prefer,
+            no_test: args.no_test,
+            source: resolved.source,
+            mirror_base_url: resolved.mirror_base_url,
+            packages,
+            started: Mutex::new(HashSet::new()),
+        };
+
         for spec in &args.packages {
             installer.install_spec(&client, spec.clone()).await?;
         }
+        println!("logs: {}", installer.log_path.display());
         anyhow::Ok(())
     })?;
 
-    println!("logs: {}", installer.log_path.display());
     Ok(0)
+}
+
+/// Download and parse `<mirror>/modules/02packages.details.txt.gz`.
+async fn load_mirror_index(client: &Client, mirror_base_url: &str) -> Result<PackageDetails> {
+    let url = format!(
+        "{}/modules/02packages.details.txt.gz",
+        mirror_base_url.trim_end_matches('/')
+    );
+    let response = client
+        .http()
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("downloading {url}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        bail!("downloading {url}: HTTP {}", status.as_u16());
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .with_context(|| format!("reading {url}"))?;
+    PackageDetails::load_bytes(&bytes).with_context(|| format!("parsing {url}"))
 }
 
 /// One `upt cpan install` run: the immutable configuration plus the set of
@@ -257,6 +309,9 @@ struct Installer {
     no_test: bool,
     source: CpanSource,
     mirror_base_url: String,
+    /// The mirror's `02packages.details.txt` index, loaded once when
+    /// `source = "mirror"`; `None` in MetaCPAN mode.
+    packages: Option<PackageDetails>,
     started: Mutex<HashSet<String>>,
 }
 
@@ -265,10 +320,11 @@ struct Installer {
 struct Resolved {
     distribution: String,
     version: String,
-    /// The URL to actually fetch the tarball from (already rewritten to the
-    /// configured mirror when `source = "mirror"`).
+    /// The URL to fetch the tarball from — MetaCPAN's download URL, or
+    /// `<mirror>/authors/id/<path>` in mirror mode.
     url: String,
-    /// SHA-256 of the archive, when MetaCPAN reported one.
+    /// SHA-256 of the archive when it is known (MetaCPAN mode only; the mirror
+    /// index carries no checksums).
     checksum: Option<String>,
     /// File name to save the tarball under, e.g. `JSON-PP-4.16.tar.gz`.
     archive_name: String,
@@ -494,29 +550,44 @@ impl Installer {
         Ok(response.bytes().await?.to_vec())
     }
 
-    /// Resolve a top-level SPEC, trying it as a module name first and falling
-    /// back to a distribution name.
+    /// Resolve a top-level SPEC (a module *or* distribution name).
     async fn resolve_spec(&self, client: &Client, spec: &str) -> Result<Resolved> {
-        match client.download_url(spec).await {
-            Ok(d) => self.resolved_from_download_url(spec, &d),
-            Err(err) if err.is_not_found() => {
-                let release = client
-                    .release(spec)
-                    .await
-                    .with_context(|| format!("`{spec}` is not a known module or distribution"))?;
-                self.resolved_from_release(spec, &release)
-            }
-            Err(err) => Err(anyhow::Error::new(err).context(format!("resolving `{spec}`"))),
+        match self.source {
+            CpanSource::Mirror => self.resolve_from_index(spec),
+            CpanSource::Metacpan => match client.download_url(spec).await {
+                Ok(d) => self.resolved_from_download_url(spec, &d),
+                Err(err) if err.is_not_found() => {
+                    let release = client.release(spec).await.with_context(|| {
+                        format!("`{spec}` is not a known module or distribution")
+                    })?;
+                    self.resolved_from_release(spec, &release)
+                }
+                Err(err) => Err(anyhow::Error::new(err).context(format!("resolving `{spec}`"))),
+            },
         }
     }
 
-    /// Resolve a module name to its providing release via `download_url`.
+    /// Resolve a module name to its providing release.
     async fn resolve_module(&self, client: &Client, module: &str) -> Result<Resolved> {
-        let d = client
-            .download_url(module)
-            .await
-            .map_err(anyhow::Error::new)?;
-        self.resolved_from_download_url(module, &d)
+        match self.source {
+            CpanSource::Mirror => self.resolve_from_index(module),
+            CpanSource::Metacpan => {
+                let d = client
+                    .download_url(module)
+                    .await
+                    .map_err(anyhow::Error::new)?;
+                self.resolved_from_download_url(module, &d)
+            }
+        }
+    }
+
+    /// Resolve `query` against the mirror's `02packages` index.
+    fn resolve_from_index(&self, query: &str) -> Result<Resolved> {
+        let index = self
+            .packages
+            .as_ref()
+            .expect("the package index is loaded in mirror mode");
+        resolve_index_entry(index, &self.mirror_base_url, query)
     }
 
     fn resolved_from_download_url(&self, query: &str, d: &DownloadUrl) -> Result<Resolved> {
@@ -532,7 +603,7 @@ impl Installer {
         )?;
         Ok(Resolved {
             archive_name: archive_name(cdn, &distribution, &version),
-            url: self.fetch_url(cdn),
+            url: cdn.to_string(),
             checksum: d.checksum_sha256.clone(),
             distribution,
             version,
@@ -552,21 +623,11 @@ impl Installer {
         )?;
         Ok(Resolved {
             archive_name: archive_name(cdn, &distribution, &version),
-            url: self.fetch_url(cdn),
+            url: cdn.to_string(),
             checksum: r.checksum_sha256.clone(),
             distribution,
             version,
         })
-    }
-
-    /// The URL to download from: the CDN URL MetaCPAN gave, or — when
-    /// `source = "mirror"` — the same `authors/id/...` path under the configured
-    /// mirror base.
-    fn fetch_url(&self, cdn_url: &str) -> String {
-        match self.source {
-            CpanSource::Metacpan => cdn_url.to_string(),
-            CpanSource::Mirror => mirror_url(&self.mirror_base_url, cdn_url),
-        }
     }
 
     /// Append one step's captured output to the shared `install.log`, under a
@@ -732,14 +793,72 @@ fn archive_name(url: &str, distribution: &str, version: &str) -> String {
         )
 }
 
-/// Rewrite a CDN download URL to fetch the same archive from `base` instead:
-/// everything from `authors/id/` onward is joined onto the mirror base. A URL
-/// with no `authors/id/` path is returned unchanged.
-fn mirror_url(base: &str, cdn_url: &str) -> String {
-    match cdn_url.find("/authors/id/") {
-        Some(idx) => format!("{}/{}", base.trim_end_matches('/'), &cdn_url[idx + 1..]),
-        None => cdn_url.to_string(),
+/// Strip a CPAN archive's compression/container extension:
+/// `Foo-Bar-1.23.tar.gz` -> `Foo-Bar-1.23`.
+fn strip_archive_ext(archive: &str) -> &str {
+    for ext in [
+        ".tar.gz", ".tar.bz2", ".tar.xz", ".tgz", ".tbz", ".tbz2", ".txz", ".zip", ".tar",
+    ] {
+        if let Some(stem) = archive.strip_suffix(ext) {
+            return stem;
+        }
     }
+    archive
+}
+
+/// Last-resort `02packages` lookup: the first entry whose archive path is a
+/// release of the distribution named `dist` (its main module was not the
+/// dash-to-`::` transform of the name).
+fn find_in_index<'a>(
+    index: &'a PackageDetails,
+    dist: &str,
+) -> Option<&'a cpan_packagedetails::Entry> {
+    index.entries().find(|entry| {
+        let archive = entry.path().rsplit('/').next().unwrap_or("");
+        split_release_name(strip_archive_ext(archive)).is_some_and(|(name, _)| name == dist)
+    })
+}
+
+/// Resolve `query` (a module name, a dashed distribution name, or a dashed name
+/// whose main module differs) against a `02packages` index and build the
+/// [`Resolved`] pointing at `<mirror_base_url>/authors/id/<path>`.
+fn resolve_index_entry(
+    index: &PackageDetails,
+    mirror_base_url: &str,
+    query: &str,
+) -> Result<Resolved> {
+    let entry = index
+        .get(query)
+        .or_else(|| {
+            (!query.contains("::"))
+                .then(|| index.get(&query.replace('-', "::")))
+                .flatten()
+        })
+        .or_else(|| find_in_index(index, query))
+        .with_context(|| format!("`{query}` is not in the mirror package index"))?;
+
+    // `entry.path()` is relative to `authors/id/`, e.g.
+    // `H/HA/HAARG/JSON-PP-4.16.tar.gz`.
+    let rel_path = entry.path().trim_start_matches('/');
+    let archive_name = rel_path
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .with_context(|| format!("index entry for `{query}` has no archive path"))?
+        .to_string();
+    let (distribution, version) =
+        name_and_version(None, None, Some(strip_archive_ext(&archive_name)), query)?;
+
+    Ok(Resolved {
+        url: format!(
+            "{}/authors/id/{rel_path}",
+            mirror_base_url.trim_end_matches('/')
+        ),
+        checksum: None,
+        archive_name,
+        distribution,
+        version,
+    })
 }
 
 /// The JSON envelope `upt dist <step> --json` emits: an optional `prereqs`
@@ -998,27 +1117,68 @@ mod tests {
     }
 
     #[test]
-    fn mirror_url_swaps_the_host_below_authors_id() {
+    fn strip_archive_ext_handles_every_cpan_extension() {
+        assert_eq!(strip_archive_ext("Foo-Bar-1.23.tar.gz"), "Foo-Bar-1.23");
+        assert_eq!(strip_archive_ext("Foo-Bar-1.23.tgz"), "Foo-Bar-1.23");
+        assert_eq!(strip_archive_ext("Foo-Bar-1.23.tar.bz2"), "Foo-Bar-1.23");
+        assert_eq!(strip_archive_ext("Foo-Bar-1.23.tar.xz"), "Foo-Bar-1.23");
+        assert_eq!(strip_archive_ext("Foo-Bar-1.23.zip"), "Foo-Bar-1.23");
+        assert_eq!(strip_archive_ext("Foo-Bar-1.23"), "Foo-Bar-1.23");
+    }
+
+    fn index(entries: &[(&str, &str, &str)]) -> cpan_packagedetails::PackageDetails {
+        let mut pd = cpan_packagedetails::PackageDetails::new();
+        for (package, version, path) in entries {
+            pd.add_entry(cpan_packagedetails::Entry::new(
+                *package,
+                Some(version.to_string()),
+                *path,
+            ))
+            .unwrap();
+        }
+        pd
+    }
+
+    #[test]
+    fn resolve_index_entry_by_module_name() {
+        let pd = index(&[("JSON::PP", "4.16", "H/HA/HAARG/JSON-PP-4.16.tar.gz")]);
+        let r = resolve_index_entry(&pd, "https://mirror.example/cpan/", "JSON::PP").unwrap();
+        assert_eq!(r.distribution, "JSON-PP");
+        assert_eq!(r.version, "4.16");
+        assert_eq!(r.archive_name, "JSON-PP-4.16.tar.gz");
         assert_eq!(
-            mirror_url(
-                "https://mirror.example/cpan/",
-                "https://cpan.metacpan.org/authors/id/H/HA/HAARG/JSON-PP-4.16.tar.gz"
-            ),
+            r.url,
             "https://mirror.example/cpan/authors/id/H/HA/HAARG/JSON-PP-4.16.tar.gz"
         );
-        // Trailing slash on the base is optional.
+        assert_eq!(r.checksum, None);
+    }
+
+    #[test]
+    fn resolve_index_entry_falls_back_to_the_main_module_then_a_scan() {
+        let pd = index(&[
+            ("LWP", "6.77", "O/OA/OALDERS/libwww-perl-6.77.tar.gz"),
+            ("Try::Tiny", "0.31", "E/ET/ETHER/Try-Tiny-0.31.tar.gz"),
+        ]);
+        // Dashed name whose main module is the dash->:: transform.
+        let r = resolve_index_entry(&pd, "https://m/", "Try-Tiny").unwrap();
+        assert_eq!(r.distribution, "Try-Tiny");
+        // Dashed name whose main module is *not* the transform: found by scan.
+        let r = resolve_index_entry(&pd, "https://m/", "libwww-perl").unwrap();
+        assert_eq!(r.distribution, "libwww-perl");
+        assert_eq!(r.version, "6.77");
         assert_eq!(
-            mirror_url(
-                "https://mirror.example/cpan",
-                "https://cpan.metacpan.org/authors/id/A/AB/ABC/X-1.0.tar.gz"
-            ),
-            "https://mirror.example/cpan/authors/id/A/AB/ABC/X-1.0.tar.gz"
+            r.url,
+            "https://m/authors/id/O/OA/OALDERS/libwww-perl-6.77.tar.gz"
         );
-        // No authors/id path: unchanged.
-        assert_eq!(
-            mirror_url("https://mirror.example/", "https://example/weird.tgz"),
-            "https://example/weird.tgz"
-        );
+    }
+
+    #[test]
+    fn resolve_index_entry_errors_when_absent() {
+        let pd = index(&[("Foo::Bar", "1.0", "A/AA/AAA/Foo-Bar-1.0.tar.gz")]);
+        let err = resolve_index_entry(&pd, "https://m/", "No::Such::Module")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not in the mirror package index"), "{err}");
     }
 
     // -- step bookkeeping --------------------------------------------------

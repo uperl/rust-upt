@@ -1,14 +1,15 @@
-//! Integration test for `upt cpan install --source mirror`.
+//! Integration tests for `upt cpan install --source mirror`.
 //!
-//! A throwaway in-process HTTP server plays a CPAN mirror: it serves a
+//! A CPAN mirror is stood up two ways — a throwaway in-process HTTP server, and
+//! a plain directory reached with a `file://` URL — each serving a
 //! `modules/02packages.details.txt.gz` index and the `authors/id/...` tarballs
 //! for a handful of `Acme-UPT-*` / `Acme::UPT::*` distributions built on the
 //! fly, so nothing here can collide with real CPAN modules. `--metacpan-base-url`
-//! points at a dead host, so the run only succeeds if mirror mode resolves
+//! points at a dead host, so the runs only succeed if mirror mode resolves
 //! everything from the index without touching MetaCPAN.
 //!
 //! The `Acme-UPT-Top` distribution declares one prerequisite in each of the
-//! `configure`, `build`, `test` and `runtime` phases; the test checks that all
+//! `configure`, `build`, `test` and `runtime` phases; the tests check that all
 //! four land in a throwaway install base, except that the `test`-phase one is
 //! installed only when `--no-test` is *not* given.
 //!
@@ -259,13 +260,13 @@ fn mock_dists() -> Vec<MockDist> {
     ]
 }
 
-/// Build the `upt cpan install Acme::UPT::Top` command against the mock, with a
-/// fresh install base / cache / config for `tag`. Returns `(cmd, install_base,
-/// cpan_cache_dir)`.
+/// Build the `upt cpan install Acme::UPT::Top` command against `mirror_base`,
+/// with a fresh install base / cache / config for `tag`. Returns
+/// `(cmd, install_base, cpan_cache_dir)`.
 fn build_cmd(
     root: &Path,
     tag: &str,
-    port: u16,
+    mirror_base: &str,
     no_test: bool,
     source: &str,
 ) -> (Command, PathBuf, PathBuf) {
@@ -290,7 +291,6 @@ fn build_cmd(
     )
     .unwrap();
 
-    let mirror_base = format!("http://127.0.0.1:{port}/");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_upt"));
     cmd.args(["--config"]).arg(&config).args([
         "cpan",
@@ -303,7 +303,7 @@ fn build_cmd(
         "--metacpan-base-url",
         "http://127.0.0.1:1/",
         "--mirror-base-url",
-        &mirror_base,
+        mirror_base,
     ]);
     if no_test {
         cmd.arg("--no-test");
@@ -321,10 +321,15 @@ fn build_cmd(
     (cmd, install_base, cache_home.join("upt/cpan"))
 }
 
-/// Run a successful `--source mirror` install; returns
+/// Run a `--source mirror` install and assert it succeeded; returns
 /// `(stdout, install_base, cpan_cache_dir)`.
-fn run_install(root: &Path, tag: &str, port: u16, no_test: bool) -> (String, PathBuf, PathBuf) {
-    let (mut cmd, install_base, cpan_cache) = build_cmd(root, tag, port, no_test, "mirror");
+fn run_install(
+    root: &Path,
+    tag: &str,
+    mirror_base: &str,
+    no_test: bool,
+) -> (String, PathBuf, PathBuf) {
+    let (mut cmd, install_base, cpan_cache) = build_cmd(root, tag, mirror_base, no_test, "mirror");
     let out = cmd.output().expect("run upt cpan install");
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -333,6 +338,31 @@ fn run_install(root: &Path, tag: &str, port: u16, no_test: bool) -> (String, Pat
         "`upt cpan install` (no_test={no_test}) failed\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
     );
     (stdout, install_base, cpan_cache)
+}
+
+/// Lay out a CPAN mirror on disk under `dir`: `modules/02packages.details.txt.gz`
+/// plus every dist's tarball under `authors/id/`.
+fn write_disk_mirror(dir: &Path, src: &Path, dists: &[MockDist]) {
+    std::fs::create_dir_all(dir.join("modules")).unwrap();
+    let mut index = PackageDetails::new();
+    for dist in dists {
+        dist.write_tree(src);
+        let archive = dir.join("authors/id").join(dist.author_rel_path());
+        std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        std::fs::write(&archive, dist.tarball(src)).unwrap();
+        index
+            .add_entry(Entry::new(
+                dist.module.clone(),
+                Some("1.00".to_string()),
+                dist.author_rel_path(),
+            ))
+            .unwrap();
+    }
+    std::fs::write(
+        dir.join("modules/02packages.details.txt.gz"),
+        index.to_gz_bytes().unwrap(),
+    )
+    .unwrap();
 }
 
 fn installed_module(install_base: &Path, module_path: &str) -> bool {
@@ -372,11 +402,11 @@ fn mirror_mode_installs_phase_deps_and_respects_no_test() {
         index_gz: index.to_gz_bytes().unwrap(),
         archives,
     };
-    let port = start_server(mirror);
+    let base = format!("http://127.0.0.1:{}/", start_server(mirror));
 
     // --- sanity: `--source metacpan` points at a dead host and cannot resolve
     // anything, so only mirror mode (the `02packages` index) makes this work.
-    let (mut cmd, no_install, _) = build_cmd(tmp.path(), "metacpan", port, true, "metacpan");
+    let (mut cmd, no_install, _) = build_cmd(tmp.path(), "metacpan", &base, true, "metacpan");
     let out = cmd.output().expect("run upt cpan install (metacpan mode)");
     assert!(
         !out.status.success(),
@@ -388,7 +418,7 @@ fn mirror_mode_installs_phase_deps_and_respects_no_test() {
     );
 
     // --- with --no-test: the test-phase prerequisite must NOT be installed.
-    let (stdout, install, cpan_cache) = run_install(tmp.path(), "notest", port, true);
+    let (stdout, install, cpan_cache) = run_install(tmp.path(), "notest", &base, true);
 
     assert!(
         installed_module(&install, "Acme/UPT/Top.pm"),
@@ -436,7 +466,7 @@ fn mirror_mode_installs_phase_deps_and_respects_no_test() {
     );
 
     // --- without --no-test: the test-phase prerequisite IS installed.
-    let (stdout, install, _) = run_install(tmp.path(), "full", port, false);
+    let (stdout, install, _) = run_install(tmp.path(), "full", &base, false);
 
     for phase_mod in ["Configure", "Build", "Runtime", "Test"] {
         assert!(
@@ -451,5 +481,41 @@ fn mirror_mode_installs_phase_deps_and_respects_no_test() {
     assert!(
         stdout.contains("Acme-UPT-Top-1.00  test  ok"),
         "Top's own test step runs on a full run\n{stdout}"
+    );
+}
+
+#[test]
+fn mirror_mode_works_against_a_file_url() {
+    for tool in ["perl", "make", "tar"] {
+        if !tool_available(tool) {
+            eprintln!("skipping cpan file-url integration test: `{tool}` not on PATH");
+            return;
+        }
+    }
+
+    let tmp = TempDir::new("fileurl");
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+
+    // A CPAN mirror on local disk, reached with no HTTP server at all.
+    let mirror_dir = tmp.path().join("mirror");
+    write_disk_mirror(&mirror_dir, &src, &mock_dists());
+    let base = format!("file://{}", mirror_dir.display());
+
+    let (stdout, install, _) = run_install(tmp.path(), "fileurl", &base, true);
+
+    for phase_mod in ["Top", "Configure", "Build", "Runtime"] {
+        assert!(
+            installed_module(&install, &format!("Acme/UPT/{phase_mod}.pm")),
+            "{phase_mod} installed from the file:// mirror\n{stdout}"
+        );
+    }
+    assert!(
+        !installed_module(&install, "Acme/UPT/Test.pm"),
+        "test-phase prerequisite skipped with --no-test\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Acme-UPT-Top-1.00  install  ok"),
+        "per-step summary line on stdout\n{stdout}"
     );
 }

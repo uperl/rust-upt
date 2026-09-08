@@ -24,7 +24,8 @@
 //! and every SPEC — including recursively-discovered prerequisites — is looked
 //! up in it; the tarball is fetched from `<mirror-base-url>/authors/id/<path>`.
 //! MetaCPAN is not contacted. The index carries no checksums, so downloads are
-//! not verified in this mode.
+//! not verified in this mode. `mirror-base-url` may be an `http(s)://` URL or a
+//! `file:///absolute/path` for a mirror on local disk or an NFS mount.
 //!
 //! The `[cpan]` config section (`source`, `metacpan-base-url`,
 //! `mirror-base-url`) supplies the defaults; `--source`, `--metacpan-base-url`
@@ -56,13 +57,14 @@ use std::pin::Pin;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use cpan_distribution_build::{
     BuildTool, Dependencies, Dependency, Distribution, ExecuteResult, Perl,
 };
 use cpan_packagedetails::PackageDetails;
 use metacpan_api_modern::Client;
+use metacpan_api_modern::reqwest::Url;
 use metacpan_api_modern::types::{DownloadUrl, Release};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -271,27 +273,51 @@ fn install(cx: &crate::Cx, common: &CommonArgs, args: InstallArgs) -> Result<i32
     Ok(0)
 }
 
-/// Download and parse `<mirror>/modules/02packages.details.txt.gz`.
+/// Fetch and parse `<mirror>/modules/02packages.details.txt.gz`.
 async fn load_mirror_index(client: &Client, mirror_base_url: &str) -> Result<PackageDetails> {
     let url = format!(
         "{}/modules/02packages.details.txt.gz",
         mirror_base_url.trim_end_matches('/')
     );
+    let bytes = fetch(client, &url).await?;
+    PackageDetails::load_bytes(&bytes).with_context(|| format!("parsing {url}"))
+}
+
+/// Fetch `url`'s bytes: over HTTP(S) through `client`, or straight off the local
+/// filesystem for a `file://` URL (so a mirror can live on disk or an NFS
+/// mount).
+async fn fetch(client: &Client, url: &str) -> Result<Vec<u8>> {
+    if let Some(path) = file_url_path(url)? {
+        return std::fs::read(&path).with_context(|| format!("reading {}", path.display()));
+    }
     let response = client
         .http()
-        .get(&url)
+        .get(url)
         .send()
         .await
-        .with_context(|| format!("downloading {url}"))?;
+        .with_context(|| format!("requesting {url}"))?;
     let status = response.status();
     if !status.is_success() {
-        bail!("downloading {url}: HTTP {}", status.as_u16());
+        bail!("{url}: HTTP {}", status.as_u16());
     }
-    let bytes = response
+    Ok(response
         .bytes()
         .await
-        .with_context(|| format!("reading {url}"))?;
-    PackageDetails::load_bytes(&bytes).with_context(|| format!("parsing {url}"))
+        .with_context(|| format!("reading the response body of {url}"))?
+        .to_vec())
+}
+
+/// The local path a `file:` URL points at, or `None` for any other scheme. A
+/// `file://` URL with a remote host (or one that is otherwise not a local path)
+/// is an error.
+fn file_url_path(url: &str) -> Result<Option<PathBuf>> {
+    if !url.starts_with("file:") {
+        return Ok(None);
+    }
+    let parsed = Url::parse(url).with_context(|| format!("invalid file URL {url}"))?;
+    parsed.to_file_path().map(Some).map_err(|()| {
+        anyhow!("{url}: not a local path (use `file:///absolute/path`, not a remote host)")
+    })
 }
 
 /// One `upt cpan install` run: the immutable configuration plus the set of
@@ -370,10 +396,9 @@ impl Installer {
             return Ok(());
         }
 
-        let bytes = self
-            .download(client, &resolved.url)
+        let bytes = fetch(client, &resolved.url)
             .await
-            .with_context(|| format!("downloading {}", resolved.url))?;
+            .with_context(|| format!("fetching {}", resolved.url))?;
         verify_sha256(&bytes, resolved.checksum.as_deref(), &label)?;
 
         let archive_path = self.run_dir.join(&resolved.archive_name);
@@ -537,17 +562,6 @@ impl Installer {
             Some(tool) => Distribution::with_preference(dir, perl, tool),
         };
         opened.with_context(|| format!("opening the distribution in {}", dir.display()))
-    }
-
-    /// GET `url` through the MetaCPAN client's HTTP client, returning the body
-    /// bytes. A non-2xx response is an error.
-    async fn download(&self, client: &Client, url: &str) -> Result<Vec<u8>> {
-        let response = client.http().get(url).send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            bail!("HTTP {}", status.as_u16());
-        }
-        Ok(response.bytes().await?.to_vec())
     }
 
     /// Resolve a top-level SPEC (a module *or* distribution name).
@@ -1179,6 +1193,26 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("not in the mirror package index"), "{err}");
+    }
+
+    #[test]
+    fn file_url_path_maps_only_file_urls_to_local_paths() {
+        assert_eq!(file_url_path("https://cpan.example/x").unwrap(), None);
+        assert_eq!(file_url_path("http://127.0.0.1:9/x").unwrap(), None);
+
+        assert_eq!(
+            file_url_path("file:///srv/CPAN/modules/02packages.details.txt.gz").unwrap(),
+            Some(PathBuf::from("/srv/CPAN/modules/02packages.details.txt.gz"))
+        );
+        // Percent-encoded bytes are decoded.
+        assert_eq!(
+            file_url_path("file:///tmp/my%20mirror/x").unwrap(),
+            Some(PathBuf::from("/tmp/my mirror/x"))
+        );
+
+        // A remote host in a file:// URL is not a local path (on unix).
+        #[cfg(unix)]
+        assert!(file_url_path("file://elsewhere/srv/CPAN/x").is_err());
     }
 
     // -- step bookkeeping --------------------------------------------------

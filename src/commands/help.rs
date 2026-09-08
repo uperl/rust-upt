@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 
 use anyhow::{Result, bail};
 
+use crate::commands::Builtin;
 use crate::{Cx, commands, external, pathsearch};
 
 pub const HELP: &str = "\
@@ -42,6 +43,14 @@ pub fn run(cx: &Cx, args: &[String]) -> Result<i32> {
     bail!("no help for '{topic}': not a built-in command and no `upt-{topic}` on PATH");
 }
 
+/// Collect built-ins into a list ordered alphabetically by the name the user
+/// types, so `upt help` lists them predictably regardless of registry order.
+fn sorted_by_name<'a>(builtins: impl Iterator<Item = &'a Builtin>) -> Vec<&'a Builtin> {
+    let mut list: Vec<&Builtin> = builtins.collect();
+    list.sort_by_key(|b| b.name);
+    list
+}
+
 /// Render the top-level help text.
 pub fn general(cx: &Cx) -> String {
     let s = &cx.style;
@@ -75,13 +84,13 @@ pub fn general(cx: &Cx) -> String {
         .unwrap_or(0);
 
     let _ = writeln!(out, "{}", s.bold("Built-in commands:"));
-    for b in commands::ordinary() {
+    for b in sorted_by_name(commands::ordinary()) {
         let _ = writeln!(out, "    {:<width$}    {}", b.name, b.summary);
     }
     out.push('\n');
 
     let _ = writeln!(out, "{}", s.bold("Drop-in replacements:"));
-    for b in commands::drop_in_replacements() {
+    for b in sorted_by_name(commands::drop_in_replacements()) {
         match b.legacy_name {
             // Only note the legacy name when it differs from the `upt` name.
             Some(legacy) if legacy != b.name => {
@@ -111,4 +120,27 @@ pub fn general(cx: &Cx) -> String {
     );
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sorted_by_name;
+    use crate::commands;
+
+    fn names<'a>(it: impl Iterator<Item = &'a commands::Builtin>) -> Vec<&'a str> {
+        sorted_by_name(it).iter().map(|b| b.name).collect()
+    }
+
+    #[test]
+    fn built_ins_and_drop_ins_list_alphabetically() {
+        let ordinary = names(commands::ordinary());
+        let mut sorted = ordinary.clone();
+        sorted.sort_unstable();
+        assert_eq!(ordinary, sorted);
+
+        let drop_ins = names(commands::drop_in_replacements());
+        let mut sorted = drop_ins.clone();
+        sorted.sort_unstable();
+        assert_eq!(drop_ins, sorted);
+    }
 }

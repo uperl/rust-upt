@@ -27,7 +27,8 @@ pub struct Builtin {
     pub run: fn(&Cx, &[String]) -> Result<i32>,
 }
 
-/// Every built-in, in the order `upt help` lists them.
+/// Every built-in. `upt help` sorts these by name for display; the order here
+/// is not significant.
 pub static BUILTINS: &[Builtin] = &[
     Builtin {
         name: "help",
@@ -56,6 +57,13 @@ pub static BUILTINS: &[Builtin] = &[
         legacy_name: None,
         help: None,
         run: crate::dist::run,
+    },
+    Builtin {
+        name: "cpan",
+        summary: "Install distributions from CPAN by name",
+        legacy_name: None,
+        help: None,
+        run: crate::cpan::run,
     },
     Builtin {
         name: "perl",

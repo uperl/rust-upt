@@ -180,6 +180,10 @@ impl From<crate::config::DistPrefer> for Prefer {
     }
 }
 
+// Unlike the other subcommand groups, `upt dist --help` keeps declaration
+// order: the steps form a pipeline (`pre-configure` -> `configure` -> `build`
+// -> `test` -> `install`, then the two cleanup steps), and listing them in
+// that order is more useful than alphabetically.
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Print the prerequisites that must be installed before `configure` can run
@@ -570,7 +574,10 @@ fn open_distribution(dir: &Path, perl: Perl, prefer: Prefer) -> Result<Distribut
 
 /// The pre-configure prerequisites as `{ "configure": [ { "module", "version" },
 /// ... ] }` — they are all configure-phase requirements.
-fn pre_configure_prereqs_json(deps: &[Dependency]) -> Value {
+///
+/// `pub(crate)` so `upt cpan` can write the same per-step JSON that
+/// `upt dist pre-configure --json` produces.
+pub(crate) fn pre_configure_prereqs_json(deps: &[Dependency]) -> Value {
     let rows: Vec<Value> = deps
         .iter()
         .map(|d| json!({ "module": d.module, "version": d.version }))
@@ -615,7 +622,10 @@ fn print_pre_configure_table(deps: &[Dependency], show_all: bool, perl: &Perl, c
 /// The resolved prerequisites as the full picture:
 /// `{ "<phase>": [ { "relationship", "module", "version" }, ... ], ... }` with
 /// every CPAN phase present as a key (empty phases map to `[]`).
-fn resolved_prereqs_json(deps: &Dependencies) -> Value {
+///
+/// `pub(crate)` so `upt cpan` can write the same per-step JSON that
+/// `upt dist configure --json` produces.
+pub(crate) fn resolved_prereqs_json(deps: &Dependencies) -> Value {
     let phases = [
         ("configure", &deps.configure),
         ("build", &deps.build),
@@ -780,7 +790,10 @@ fn print_unmet_legend(any_unmet: bool) {
 ///
 /// An `installed` string that cannot be parsed never satisfies a non-empty
 /// range; an empty range (or just `0`) is always satisfied.
-fn version_satisfies(required: &str, installed: &str) -> bool {
+///
+/// `pub(crate)` so `upt cpan` can decide, without any `dist_status`-style state
+/// tracking, whether a `requires` prerequisite is already satisfied.
+pub(crate) fn version_satisfies(required: &str, installed: &str) -> bool {
     use std::cmp::Ordering;
 
     let clauses: Vec<(&str, &str)> = required
@@ -998,6 +1011,35 @@ mod tests {
     };
     use clap::Parser;
     use std::cmp::Ordering;
+
+    #[test]
+    fn help_lists_subcommands_in_pipeline_order() {
+        // `upt dist` deliberately keeps declaration order (the build pipeline),
+        // unlike the alphabetised listings elsewhere.
+        use clap::CommandFactory;
+        let help = Cli::command().render_long_help().to_string();
+        let order = [
+            "pre-configure",
+            "configure",
+            "build",
+            "test",
+            "install",
+            "clean",
+            "distclean",
+        ];
+        let positions: Vec<usize> = order
+            .iter()
+            .map(|name| {
+                help.find(&format!("\n  {name} "))
+                    .or_else(|| help.find(&format!("\n  {name}\n")))
+                    .unwrap_or_else(|| panic!("`{name}` missing from help:\n{help}"))
+            })
+            .collect();
+        assert!(
+            positions.windows(2).all(|w| w[0] < w[1]),
+            "subcommands not in pipeline order: {help}"
+        );
+    }
 
     #[test]
     fn install_runs_test_by_default_and_no_test_skips_it() {

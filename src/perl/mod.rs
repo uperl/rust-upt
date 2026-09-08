@@ -75,7 +75,10 @@ struct Cli {
     command: Command,
 }
 
+// `next_display_order = None` makes clap list the subcommands in `--help`
+// alphabetically rather than in declaration order, matching `upt help`.
 #[derive(Debug, Subcommand)]
+#[command(next_display_order = None)]
 enum Command {
     /// Execute `perl` using the `perl-wrapper` built from a `[perl.<name>]`
     /// config section.
@@ -619,6 +622,7 @@ mod tests {
             database_path: None,
             patch_perl: crate::config::PatchPerlMode::Auto,
             dist_prefer: crate::config::DistPrefer::Auto,
+            cpan: crate::config::Cpan::default(),
             perl,
         }
     }

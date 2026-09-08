@@ -70,6 +70,43 @@ The interpreter to build with comes from a `[perl.<name>]` config section:
 `--perl <name>` selects it, and without it `perl.default` is used — the same
 resolution as [`upt perl exec`](#upt-perl).
 
+### `upt cpan install <SPEC>...`
+
+Install distributions from CPAN by name: resolve each `SPEC` (a module or
+distribution name), download and unpack the release, then run the
+[`upt dist`](#upt-dist-step) pipeline (`pre-configure` → `configure` → `build` →
+`test` → `install`) on it, recursively installing any missing hard (`requires`)
+prerequisites discovered at the `pre-configure` and `configure` steps. `--perl
+<name>` selects the interpreter to build with (without it, `perl.default`);
+`--no-test` (alias `--no-tests`) skips the test suite and does not install
+`test`-phase prerequisites.
+
+Resolution follows `cpan.source`. With `metacpan` (the default) each SPEC goes
+through the MetaCPAN `download_url` API. With `mirror`, the mirror's own index
+(`<mirror-base-url>/modules/02packages.details.txt.gz`) is fetched once and
+every SPEC — prerequisites included — is looked up there; tarballs come from
+`<mirror-base-url>/authors/id/...` and MetaCPAN is never contacted (the index
+has no checksums, so downloads are unverified in this mode). `mirror-base-url`
+may be `http(s)://`, a `file:///absolute/path` for a mirror on local disk, or
+`ftp://` (anonymous unless the URL carries credentials; `ftps` is not
+supported).
+
+The `[cpan]` config section supplies the defaults; `--source <metacpan|mirror>`,
+`--metacpan-base-url <url>` and `--mirror-base-url <url>` override
+`cpan.source`, `cpan.metacpan-base-url` and `cpan.mirror-base-url` for a single
+invocation.
+
+stdout stays terse — one line per step per distribution, plus the missing
+prerequisites listed at `pre-configure` and `configure`. Everything else goes
+under a per-run cache directory `<cache>/upt/cpan/<run-id>/` (`<run-id>` is a
+UTC timestamp, so runs sort oldest-first; a `latest` symlink points at the
+newest where symlinks are supported):
+
+* `install.log` — the merged raw output of every build step.
+* `<dist>-<version>/` — the unpacked tarball.
+* `<dist>-<version>.<step>.json` — written as each step completes, with the same
+  JSON body `upt dist <step> --json` produces.
+
 ### `upt perl <SUBCOMMAND>`
 
 Run a configured `perl` and manage the named `perl-wrapper` configurations in
@@ -244,6 +281,14 @@ patch-perl = "auto"
 #   "mb"   - prefer `Build.PL` (Module::Build)
 #   "eumm" - prefer `Makefile.PL` (ExtUtils::MakeMaker)
 prefer = "auto"
+
+[cpan]
+# Where `upt cpan install` fetches releases from:
+#   "metacpan" - resolve and download through the MetaCPAN API
+#   "mirror"   - fetch from a configured CPAN mirror
+source = "metacpan"
+mirror-base-url = "https://www.cpan.org/"          # used when source = "mirror"
+metacpan-base-url = "https://fastapi.metacpan.org/v1/"  # used when source = "metacpan"
 
 # Named perl-wrapper configurations for `upt perl`. Each [perl.<name>] table
 # builds one perl-wrapper object.

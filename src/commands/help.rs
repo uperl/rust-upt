@@ -51,29 +51,6 @@ fn sorted_by_name<'a>(builtins: impl Iterator<Item = &'a Builtin>) -> Vec<&'a Bu
     list
 }
 
-#[cfg(test)]
-mod tests {
-    use super::sorted_by_name;
-    use crate::commands;
-
-    fn names<'a>(it: impl Iterator<Item = &'a commands::Builtin>) -> Vec<&'a str> {
-        sorted_by_name(it).iter().map(|b| b.name).collect()
-    }
-
-    #[test]
-    fn built_ins_and_drop_ins_list_alphabetically() {
-        let ordinary = names(commands::ordinary());
-        let mut sorted = ordinary.clone();
-        sorted.sort_unstable();
-        assert_eq!(ordinary, sorted);
-
-        let drop_ins = names(commands::drop_in_replacements());
-        let mut sorted = drop_ins.clone();
-        sorted.sort_unstable();
-        assert_eq!(drop_ins, sorted);
-    }
-}
-
 /// Render the top-level help text.
 pub fn general(cx: &Cx) -> String {
     let s = &cx.style;
@@ -143,4 +120,27 @@ pub fn general(cx: &Cx) -> String {
     );
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sorted_by_name;
+    use crate::commands;
+
+    fn names<'a>(it: impl Iterator<Item = &'a commands::Builtin>) -> Vec<&'a str> {
+        sorted_by_name(it).iter().map(|b| b.name).collect()
+    }
+
+    #[test]
+    fn built_ins_and_drop_ins_list_alphabetically() {
+        let ordinary = names(commands::ordinary());
+        let mut sorted = ordinary.clone();
+        sorted.sort_unstable();
+        assert_eq!(ordinary, sorted);
+
+        let drop_ins = names(commands::drop_in_replacements());
+        let mut sorted = drop_ins.clone();
+        sorted.sort_unstable();
+        assert_eq!(drop_ins, sorted);
+    }
 }

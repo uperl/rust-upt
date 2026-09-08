@@ -15,8 +15,9 @@
 //! | `distclean`     | `make distclean`     | `perl Build distclean` |
 //!
 //! The steps form a pipeline: `configure` needs `pre-configure`; `build` needs
-//! both; `test` and `install` need `build` as well; and `install --test` adds
-//! `test`. Running a step first runs any earlier step the `dist_status` table
+//! both; `test` and `install` need `build` as well; and `install` includes
+//! `test` unless `--no-test`. Running a step first runs any earlier step the
+//! `dist_status` table
 //! ([`status`]) does not already record as done, in order, stopping (and
 //! exiting non-zero) at the first failure. `clean` and `distclean` are not part
 //! of the pipeline and never trigger an auto-run.
@@ -223,12 +224,12 @@ enum Command {
     Test,
 
     /// Install the built distribution (`make install` / `perl Build install`),
-    /// first running `pre-configure`, `configure` and `build` (and, with
-    /// `--test`, `test`) if they have not run yet.
+    /// first running `pre-configure`, `configure`, `build` and `test` if they
+    /// have not run yet. `--no-test` skips the `test` step.
     Install {
-        /// Also require the test suite to pass before installing.
-        #[arg(long)]
-        test: bool,
+        /// Install without running the test suite first.
+        #[arg(long = "no-test", short = 'n')]
+        no_test: bool,
     },
 
     /// Remove build products: `make clean` or `perl Build clean`.
@@ -304,14 +305,14 @@ fn dispatch(cx: &crate::Cx, cli: Cli, color: bool) -> Result<i32> {
             Phase::Test,
             TargetOpts::default(),
         ),
-        Command::Install { test } => run_chain(
+        Command::Install { no_test } => run_chain(
             &mut dist,
             &common,
             color,
             status.as_ref(),
             Phase::Install,
             TargetOpts {
-                install_needs_test: test,
+                install_needs_test: !no_test,
                 ..TargetOpts::default()
             },
         ),
@@ -336,7 +337,7 @@ fn dispatch(cx: &crate::Cx, cli: Cli, color: bool) -> Result<i32> {
 
 /// Options that only matter when their step is the explicit target of the
 /// command (the pre-configure / configure prerequisite-table filters), plus the
-/// `install --test` flag.
+/// `install --no-test` flag.
 #[derive(Default)]
 struct TargetOpts {
     /// `configure --no-prereqs`: don't print the resolved prerequisite table.
@@ -345,13 +346,14 @@ struct TargetOpts {
     all_prereqs: bool,
     /// `configure --include-develop`: include `develop`-phase prerequisites.
     include_develop: bool,
-    /// `install --test`: make `test` a prerequisite of `install`.
+    /// Whether `test` is part of the `install` chain: true by default, false
+    /// with `install --no-test`.
     install_needs_test: bool,
 }
 
 /// The ordered list of pipeline steps to consider for `target`: every step from
 /// `pre-configure` up to and including `target`. `test` is dropped when the
-/// target is `install` and `--test` was not given.
+/// target is `install` and `--no-test` was given.
 fn chain_plan(target: Phase, install_needs_test: bool) -> Vec<Phase> {
     [
         Phase::PreConfigure,
@@ -991,11 +993,30 @@ fn step_exit_code(step: &str, result: &ExecuteResult) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, Phase, Prefer, chain_plan, cmp_versions, parse_perl_version, phase_name,
+        Cli, Command, Phase, Prefer, chain_plan, cmp_versions, parse_perl_version, phase_name,
         version_satisfies,
     };
     use clap::Parser;
     use std::cmp::Ordering;
+
+    #[test]
+    fn install_runs_test_by_default_and_no_test_skips_it() {
+        let no_test = |args: &[&str]| {
+            let argv: Vec<&str> = std::iter::once("upt dist")
+                .chain(args.iter().copied())
+                .collect();
+            match Cli::try_parse_from(argv).unwrap().command {
+                Command::Install { no_test } => no_test,
+                other => panic!("expected install, got {other:?}"),
+            }
+        };
+        assert!(!no_test(&["install"]), "test runs by default");
+        assert!(no_test(&["install", "--no-test"]));
+        assert!(no_test(&["install", "-n"]));
+
+        // `--test` is gone.
+        assert!(Cli::try_parse_from(["upt dist", "install", "--test"]).is_err());
+    }
 
     #[test]
     fn prefer_is_optional_on_the_cli_and_maps_from_dist_prefer() {
@@ -1064,11 +1085,13 @@ mod tests {
     }
 
     #[test]
-    fn install_includes_test_only_with_the_flag() {
+    fn install_chain_includes_test_unless_disabled() {
+        // `install --no-test` (install_needs_test = false): no `test` step.
         assert_eq!(
             plan_names(Phase::Install, false),
             ["pre-configure", "configure", "build", "install"]
         );
+        // Plain `install` (install_needs_test = true): `test` runs first.
         assert_eq!(
             plan_names(Phase::Install, true),
             ["pre-configure", "configure", "build", "test", "install"]

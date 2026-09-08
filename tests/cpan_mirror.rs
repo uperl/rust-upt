@@ -16,7 +16,7 @@
 //! Requires `perl`, `make` and `tar` on `PATH`; skipped otherwise.
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -369,6 +369,84 @@ fn installed_module(install_base: &Path, module_path: &str) -> bool {
     install_base.join("lib/perl5").join(module_path).is_file()
 }
 
+/// A throwaway anonymous FTP server: greeting, `USER`/`PASS`/`TYPE`, `PASV`,
+/// `RETR <path>` from an in-memory map, `QUIT`. Just enough for `fetch_ftp`.
+fn start_ftp_server(files: HashMap<String, Vec<u8>>) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock ftp");
+    let port = listener.local_addr().unwrap().port();
+    let files = Arc::new(files);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            let files = Arc::clone(&files);
+            std::thread::spawn(move || ftp_session(stream, &files));
+        }
+    });
+    port
+}
+
+fn ftp_session(mut ctrl: TcpStream, files: &HashMap<String, Vec<u8>>) {
+    let mut reader = BufReader::new(ctrl.try_clone().unwrap());
+    let _ = ctrl.write_all(b"220 mock ftp\r\n");
+    let mut data_listener: Option<TcpListener> = None;
+
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            break;
+        }
+        let line = line.trim_end();
+        let (cmd, arg) = line.split_once(' ').unwrap_or((line, ""));
+        match cmd.to_ascii_uppercase().as_str() {
+            "USER" => {
+                let _ = ctrl.write_all(b"331 need password\r\n");
+            }
+            "PASS" => {
+                let _ = ctrl.write_all(b"230 logged in\r\n");
+            }
+            "TYPE" => {
+                let _ = ctrl.write_all(b"200 ok\r\n");
+            }
+            "PASV" => {
+                let l = TcpListener::bind("127.0.0.1:0").unwrap();
+                let p = l.local_addr().unwrap().port();
+                data_listener = Some(l);
+                let _ = ctrl.write_all(
+                    format!(
+                        "227 Entering Passive Mode (127,0,0,1,{},{})\r\n",
+                        p >> 8,
+                        p & 0xff
+                    )
+                    .as_bytes(),
+                );
+            }
+            "RETR" => match files.get(arg) {
+                Some(bytes) => {
+                    let _ = ctrl.write_all(b"150 opening data connection\r\n");
+                    if let Some(l) = data_listener.take()
+                        && let Ok((mut d, _)) = l.accept()
+                    {
+                        let _ = d.write_all(bytes);
+                        let _ = d.shutdown(Shutdown::Both);
+                    }
+                    let _ = ctrl.write_all(b"226 transfer complete\r\n");
+                }
+                None => {
+                    let _ = ctrl.write_all(b"550 no such file\r\n");
+                }
+            },
+            "QUIT" => {
+                let _ = ctrl.write_all(b"221 bye\r\n");
+                break;
+            }
+            other => {
+                eprintln!("mock ftp: unhandled command {other:?}");
+                let _ = ctrl.write_all(b"200 ok\r\n");
+            }
+        }
+    }
+}
+
 #[test]
 fn mirror_mode_installs_phase_deps_and_respects_no_test() {
     for tool in ["perl", "make", "tar"] {
@@ -508,6 +586,61 @@ fn mirror_mode_works_against_a_file_url() {
         assert!(
             installed_module(&install, &format!("Acme/UPT/{phase_mod}.pm")),
             "{phase_mod} installed from the file:// mirror\n{stdout}"
+        );
+    }
+    assert!(
+        !installed_module(&install, "Acme/UPT/Test.pm"),
+        "test-phase prerequisite skipped with --no-test\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Acme-UPT-Top-1.00  install  ok"),
+        "per-step summary line on stdout\n{stdout}"
+    );
+}
+
+#[test]
+fn mirror_mode_works_against_an_ftp_url() {
+    for tool in ["perl", "make", "tar"] {
+        if !tool_available(tool) {
+            eprintln!("skipping cpan ftp integration test: `{tool}` not on PATH");
+            return;
+        }
+    }
+
+    let tmp = TempDir::new("ftp");
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+
+    // The mirror lives entirely in the mock FTP server: RETR paths -> bytes.
+    let dists = mock_dists();
+    let mut files: HashMap<String, Vec<u8>> = HashMap::new();
+    let mut index = PackageDetails::new();
+    for dist in &dists {
+        dist.write_tree(&src);
+        files.insert(
+            format!("/authors/id/{}", dist.author_rel_path()),
+            dist.tarball(&src),
+        );
+        index
+            .add_entry(Entry::new(
+                dist.module.clone(),
+                Some("1.00".to_string()),
+                dist.author_rel_path(),
+            ))
+            .unwrap();
+    }
+    files.insert(
+        "/modules/02packages.details.txt.gz".to_string(),
+        index.to_gz_bytes().unwrap(),
+    );
+
+    let base = format!("ftp://127.0.0.1:{}", start_ftp_server(files));
+    let (stdout, install, _) = run_install(tmp.path(), "ftp", &base, true);
+
+    for phase_mod in ["Top", "Configure", "Build", "Runtime"] {
+        assert!(
+            installed_module(&install, &format!("Acme/UPT/{phase_mod}.pm")),
+            "{phase_mod} installed from the ftp:// mirror\n{stdout}"
         );
     }
     assert!(

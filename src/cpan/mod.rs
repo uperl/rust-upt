@@ -24,8 +24,9 @@
 //! and every SPEC — including recursively-discovered prerequisites — is looked
 //! up in it; the tarball is fetched from `<mirror-base-url>/authors/id/<path>`.
 //! MetaCPAN is not contacted. The index carries no checksums, so downloads are
-//! not verified in this mode. `mirror-base-url` may be an `http(s)://` URL or a
-//! `file:///absolute/path` for a mirror on local disk or an NFS mount.
+//! not verified in this mode. `mirror-base-url` may be `http(s)://`,
+//! `file:///absolute/path` (a mirror on local disk or an NFS mount), or `ftp://`
+//! (anonymous unless the URL carries credentials; `ftps` is not supported).
 //!
 //! The `[cpan]` config section (`source`, `metacpan-base-url`,
 //! `mirror-base-url`) supplies the defaults; `--source`, `--metacpan-base-url`
@@ -51,11 +52,12 @@ use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::future::Future;
-use std::io::{ErrorKind, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -283,12 +285,15 @@ async fn load_mirror_index(client: &Client, mirror_base_url: &str) -> Result<Pac
     PackageDetails::load_bytes(&bytes).with_context(|| format!("parsing {url}"))
 }
 
-/// Fetch `url`'s bytes: over HTTP(S) through `client`, or straight off the local
-/// filesystem for a `file://` URL (so a mirror can live on disk or an NFS
-/// mount).
+/// Fetch `url`'s bytes. `http(s)://` goes through `client`; `file://` is read
+/// straight off the local filesystem; `ftp://` uses a small built-in
+/// anonymous-passive FTP client. `ftps://` is not supported.
 async fn fetch(client: &Client, url: &str) -> Result<Vec<u8>> {
     if let Some(path) = file_url_path(url)? {
         return std::fs::read(&path).with_context(|| format!("reading {}", path.display()));
+    }
+    if url.starts_with("ftp://") {
+        return fetch_ftp(url).with_context(|| format!("fetching {url}"));
     }
     let response = client
         .http()
@@ -318,6 +323,175 @@ fn file_url_path(url: &str) -> Result<Option<PathBuf>> {
     parsed.to_file_path().map(Some).map_err(|()| {
         anyhow!("{url}: not a local path (use `file:///absolute/path`, not a remote host)")
     })
+}
+
+/// An `ftp://` URL broken into the parts the FTP client needs. Missing
+/// credentials become anonymous.
+#[derive(Debug, PartialEq, Eq)]
+struct FtpUrl {
+    host: String,
+    port: u16,
+    user: String,
+    pass: String,
+    path: String,
+}
+
+fn parse_ftp_url(url: &str) -> Result<FtpUrl> {
+    let parsed = Url::parse(url).with_context(|| format!("invalid ftp URL {url}"))?;
+    if parsed.scheme() != "ftp" {
+        bail!("{url}: not an ftp URL (ftps is not supported)");
+    }
+    Ok(FtpUrl {
+        host: parsed
+            .host_str()
+            .filter(|host| !host.is_empty())
+            .with_context(|| format!("{url}: missing host"))?
+            .to_string(),
+        port: parsed.port().unwrap_or(21),
+        user: match parsed.username() {
+            "" => "anonymous".to_string(),
+            name => name.to_string(),
+        },
+        pass: parsed.password().unwrap_or("anonymous@").to_string(),
+        path: parsed.path().to_string(),
+    })
+}
+
+/// Retrieve one file over plain FTP: log in (anonymously unless the URL carries
+/// credentials), switch to binary, open a passive data connection, `RETR`. Just
+/// enough for a CPAN mirror — no `ftps`, no active mode, no resume. The data
+/// connection reuses the control connection's host (ignoring the address in the
+/// `PASV` reply), which is what a NAT'd mirror needs anyway.
+fn fetch_ftp(url: &str) -> Result<Vec<u8>> {
+    let target = parse_ftp_url(url)?;
+    let timeout = Duration::from_secs(120);
+
+    let mut ctrl = TcpStream::connect((target.host.as_str(), target.port))
+        .with_context(|| format!("connecting to ftp://{}:{}", target.host, target.port))?;
+    ctrl.set_read_timeout(Some(timeout)).ok();
+    ctrl.set_write_timeout(Some(timeout)).ok();
+    let mut reader = BufReader::new(ctrl.try_clone().context("cloning the FTP control socket")?);
+
+    ftp_expect(&mut reader, &[2], "greeting")?;
+    ftp_cmd(
+        &mut ctrl,
+        &mut reader,
+        &format!("USER {}", target.user),
+        &[2, 3],
+    )?;
+    ftp_cmd(
+        &mut ctrl,
+        &mut reader,
+        &format!("PASS {}", target.pass),
+        &[2],
+    )?;
+    ftp_cmd(&mut ctrl, &mut reader, "TYPE I", &[2])?;
+
+    let (_, pasv) = ftp_cmd(&mut ctrl, &mut reader, "PASV", &[2])?;
+    let data_port = parse_pasv_port(&pasv)
+        .with_context(|| format!("could not parse the PASV reply: {}", pasv.trim()))?;
+    let mut data = TcpStream::connect((target.host.as_str(), data_port)).with_context(|| {
+        format!(
+            "opening the FTP data connection to {}:{data_port}",
+            target.host
+        )
+    })?;
+    data.set_read_timeout(Some(timeout)).ok();
+
+    ftp_cmd(
+        &mut ctrl,
+        &mut reader,
+        &format!("RETR {}", target.path),
+        &[1],
+    )?;
+    let mut bytes = Vec::new();
+    data.read_to_end(&mut bytes)
+        .with_context(|| format!("reading {} over FTP", target.path))?;
+    drop(data);
+
+    ftp_expect(&mut reader, &[2], "the RETR completion reply")?;
+    let _ = writeln_crlf(&mut ctrl, "QUIT");
+    Ok(bytes)
+}
+
+/// Send an FTP command and require its reply's class digit is one of `want`.
+fn ftp_cmd(
+    ctrl: &mut TcpStream,
+    reader: &mut impl BufRead,
+    command: &str,
+    want: &[u8],
+) -> Result<(u16, String)> {
+    let shown = ftp_redact(command);
+    writeln_crlf(ctrl, command).with_context(|| format!("sending FTP `{shown}`"))?;
+    ftp_expect(reader, want, &shown)
+}
+
+/// Read one (possibly multi-line) FTP reply and require its class digit (the
+/// first of the three) is in `want`. Returns `(code, full reply text)`.
+fn ftp_expect(reader: &mut impl BufRead, want: &[u8], what: &str) -> Result<(u16, String)> {
+    let (code, text) =
+        read_ftp_reply(reader).with_context(|| format!("reading the FTP reply to `{what}`"))?;
+    if want.contains(&((code / 100) as u8)) {
+        Ok((code, text))
+    } else {
+        bail!("FTP `{what}` was rejected: {}", text.trim())
+    }
+}
+
+fn read_ftp_reply(reader: &mut impl BufRead) -> Result<(u16, String)> {
+    let mut text = String::new();
+    if reader.read_line(&mut text)? == 0 {
+        bail!("the FTP server closed the connection");
+    }
+    let code: u16 = text
+        .get(..3)
+        .and_then(|digits| digits.parse().ok())
+        .with_context(|| format!("malformed FTP reply: {}", text.trim()))?;
+    // A `-` in the 4th column opens a multi-line reply, ending at a line that
+    // starts with the same code followed by a space.
+    if text.as_bytes().get(3) == Some(&b'-') {
+        let terminator = format!("{code} ");
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line)? == 0 {
+                break;
+            }
+            let last = line.starts_with(&terminator);
+            text.push_str(&line);
+            if last {
+                break;
+            }
+        }
+    }
+    Ok((code, text))
+}
+
+/// The data-connection port from a `PASV` reply's `(h1,h2,h3,h4,p1,p2)` tuple.
+fn parse_pasv_port(reply: &str) -> Option<u16> {
+    let open = reply.find('(')?;
+    let close = reply[open..].find(')')? + open;
+    let nums: Vec<u32> = reply[open + 1..close]
+        .split(',')
+        .filter_map(|n| n.trim().parse().ok())
+        .collect();
+    match nums[..] {
+        [_, _, _, _, hi, lo] => u16::try_from(hi * 256 + lo).ok(),
+        _ => None,
+    }
+}
+
+fn writeln_crlf(writer: &mut impl Write, line: &str) -> std::io::Result<()> {
+    writer.write_all(line.as_bytes())?;
+    writer.write_all(b"\r\n")?;
+    writer.flush()
+}
+
+/// A command with its password starred out, for error messages.
+fn ftp_redact(command: &str) -> String {
+    match command.strip_prefix("PASS ") {
+        Some(_) => "PASS ***".to_string(),
+        None => command.to_string(),
+    }
 }
 
 /// One `upt cpan install` run: the immutable configuration plus the set of
@@ -1213,6 +1387,41 @@ mod tests {
         // A remote host in a file:// URL is not a local path (on unix).
         #[cfg(unix)]
         assert!(file_url_path("file://elsewhere/srv/CPAN/x").is_err());
+    }
+
+    #[test]
+    fn parse_ftp_url_defaults_to_anonymous_and_port_21() {
+        let t = parse_ftp_url("ftp://ftp.example.org/pub/CPAN/modules/02packages.details.txt.gz")
+            .unwrap();
+        assert_eq!(t.host, "ftp.example.org");
+        assert_eq!(t.port, 21);
+        assert_eq!(t.user, "anonymous");
+        assert_eq!(t.pass, "anonymous@");
+        assert_eq!(t.path, "/pub/CPAN/modules/02packages.details.txt.gz");
+
+        let t = parse_ftp_url("ftp://bob:s3cr3t@mirror.example:2121/CPAN/x").unwrap();
+        assert_eq!(
+            (t.user.as_str(), t.pass.as_str(), t.port),
+            ("bob", "s3cr3t", 2121)
+        );
+
+        // `ftps` is rejected; only plain FTP is supported.
+        assert!(parse_ftp_url("ftps://secure.example/x").is_err());
+        assert!(parse_ftp_url("http://not.ftp/x").is_err());
+    }
+
+    #[test]
+    fn parse_pasv_port_reads_the_high_low_byte_pair() {
+        assert_eq!(
+            parse_pasv_port("227 Entering Passive Mode (127,0,0,1,197,102)"),
+            Some(197 * 256 + 102)
+        );
+        assert_eq!(
+            parse_pasv_port("227 Entering Passive Mode (192,168,0,1,0,21)."),
+            Some(21)
+        );
+        assert_eq!(parse_pasv_port("227 no tuple here"), None);
+        assert_eq!(parse_pasv_port("227 (1,2,3)"), None);
     }
 
     // -- step bookkeeping --------------------------------------------------

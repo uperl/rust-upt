@@ -87,7 +87,9 @@ through the MetaCPAN `download_url` API. With `mirror`, the mirror's own index
 every SPEC — prerequisites included — is looked up there; tarballs come from
 `<mirror-base-url>/authors/id/...` and MetaCPAN is never contacted (the index
 has no checksums, so downloads are unverified in this mode). `mirror-base-url`
-may be `http(s)://` or a `file:///absolute/path` for a mirror on local disk.
+may be `http(s)://`, a `file:///absolute/path` for a mirror on local disk, or
+`ftp://` (anonymous unless the URL carries credentials; `ftps` is not
+supported).
 
 The `[cpan]` config section supplies the defaults; `--source <metacpan|mirror>`,
 `--metacpan-base-url <url>` and `--mirror-base-url <url>` override

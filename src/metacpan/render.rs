@@ -115,14 +115,12 @@ pub fn author(value: Value, color: bool) -> Result<()> {
         f.text(&format!("profile {name}"), p.id.as_deref().unwrap_or("-"));
     }
     if let Some(rc) = &a.release_count {
+        // One `releases <kind>` row per tally, like the profile rows above.
+        f.text("releases cpan", rc.cpan.unwrap_or(0).to_string());
+        f.text("releases latest", rc.latest.unwrap_or(0).to_string());
         f.text(
-            "releases",
-            format!(
-                "cpan {}, latest {}, backpan-only {}",
-                rc.cpan.unwrap_or(0),
-                rc.latest.unwrap_or(0),
-                rc.backpan_only.unwrap_or(0),
-            ),
+            "releases backpan-only",
+            rc.backpan_only.unwrap_or(0).to_string(),
         );
     }
     f.opt("updated", &a.updated);

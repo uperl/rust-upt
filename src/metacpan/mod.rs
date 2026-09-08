@@ -413,6 +413,9 @@ async fn dispatch(cx: &crate::Cx, cli: Cli) -> Result<()> {
 
     match &cli.command {
         Command::Author { pauseid } => {
+            // The `author/{pauseid}` endpoint matches exactly, and PAUSE ids are
+            // always upper-case; normalise so a lower/mixed-case id still works.
+            let pauseid = pauseid.to_uppercase();
             let v = get(&client, &format!("author/{pauseid}")).await?;
             emit(v, g.json, color, |v| render::author(v, color))?;
         }

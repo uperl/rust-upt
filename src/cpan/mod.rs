@@ -12,9 +12,9 @@
 //!   (without it, `perl.default`), the same resolution as
 //!   [`upt perl exec`](crate::perl) and `upt dist`. `--no-test` installs
 //!   without running the test suite first, and skips `test`-phase prerequisites.
-//!   `--recommend` and `--suggest` additionally install the `recommends` and
-//!   `suggests` prerequisites of every phase, recursively, as though they were
-//!   `requires`.
+//!   `--recommended` and `--suggested` additionally install the `recommends`
+//!   and `suggests` prerequisites of every phase, recursively, as though they
+//!   were `requires`.
 //!
 //! # Resolution
 //!
@@ -184,7 +184,7 @@ enum Command {
     /// with `--source mirror`), download and unpack the release, and run the
     /// `dist` pipeline through `install` on it, recursively installing missing
     /// `requires` prerequisites (and `recommends` / `suggests` with
-    /// `--recommend` / `--suggest`).
+    /// `--recommended` / `--suggested`).
     Install(InstallArgs),
 }
 
@@ -207,16 +207,12 @@ struct InstallArgs {
 
     /// Also install `recommends` prerequisites, at every phase, as though they
     /// were hard `requires`.
-    #[arg(
-        long = "recommend",
-        visible_alias = "recommends",
-        alias = "recommended"
-    )]
+    #[arg(long = "recommended")]
     recommend: bool,
 
     /// Also install `suggests` prerequisites, at every phase, as though they
     /// were hard `requires`.
-    #[arg(long = "suggest", visible_alias = "suggests", alias = "suggested")]
+    #[arg(long = "suggested")]
     suggest: bool,
 }
 
@@ -528,10 +524,10 @@ struct Installer {
     prefer: Option<BuildTool>,
     no_test: bool,
     /// Promote every phase's `recommends` prerequisites to install like a
-    /// `requires` (`--recommend`).
+    /// `requires` (`--recommended`).
     recommend: bool,
     /// Promote every phase's `suggests` prerequisites to install like a
-    /// `requires` (`--suggest`).
+    /// `requires` (`--suggested`).
     suggest: bool,
     source: CpanSource,
     mirror_base_url: String,
@@ -719,9 +715,9 @@ impl Installer {
 
     /// The prerequisites from a resolved dependency tree that `upt cpan` will
     /// try to install: the `requires` of `configure`, `build` and `runtime`
-    /// always, plus `test` unless `--no-test`; and, when `--recommend` /
-    /// `--suggest` are given, the `recommends` / `suggests` of those same phases
-    /// alongside them.
+    /// always, plus `test` unless `--no-test`; and, when `--recommended` /
+    /// `--suggested` are given, the `recommends` / `suggests` of those same
+    /// phases alongside them.
     fn resolved_requires<'a>(&self, tree: &'a Dependencies) -> Vec<&'a Dependency> {
         install_deps(tree, self.no_test, self.recommend, self.suggest)
     }
@@ -1247,19 +1243,12 @@ mod tests {
     }
 
     #[test]
-    fn install_accepts_recommend_and_suggest_flags() {
+    fn install_accepts_recommended_and_suggested_flags() {
         let args = install_args(&["install", "JSON::PP"]);
         assert!(!args.recommend && !args.suggest);
 
-        let args = install_args(&["install", "--recommend", "--suggest", "JSON::PP"]);
+        let args = install_args(&["install", "--recommended", "--suggested", "JSON::PP"]);
         assert!(args.recommend && args.suggest);
-
-        // Plural `--recommends` / `--suggests` and the `-ed` spellings are
-        // accepted as aliases.
-        assert!(install_args(&["install", "--recommends", "JSON::PP"]).recommend);
-        assert!(install_args(&["install", "--suggests", "JSON::PP"]).suggest);
-        assert!(install_args(&["install", "--recommended", "JSON::PP"]).recommend);
-        assert!(install_args(&["install", "--suggested", "JSON::PP"]).suggest);
     }
 
     #[test]
@@ -1340,7 +1329,7 @@ mod tests {
     fn install_deps_adds_recommends_and_suggests_when_asked() {
         let tree = sample_tree();
 
-        // `--recommend`: every phase's `recommends`, after all the `requires`.
+        // `--recommended`: every phase's `recommends`, after all the `requires`.
         assert_eq!(
             modules(&install_deps(&tree, false, true, false)),
             [
@@ -1354,7 +1343,7 @@ mod tests {
             ]
         );
 
-        // `--suggest` alone.
+        // `--suggested` alone.
         assert_eq!(
             modules(&install_deps(&tree, false, false, true)),
             [

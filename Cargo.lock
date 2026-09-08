@@ -1123,11 +1123,12 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "perl-build"
-version = "0.1.2"
-source = "git+https://github.com/uperl/rust-perl-build?tag=v0.1.2#d24a7b302e4241d12b7ce809cb946ca661716249"
+version = "0.2.0"
+source = "git+https://github.com/uperl/rust-perl-build?tag=v0.2.0#d26b56917cb4fd8e38bd38d0fcfc283c133739ec"
 dependencies = [
  "log",
  "metacpan-api-modern",
+ "patch-perl",
  "serde_json",
  "thiserror",
 ]

@@ -13,10 +13,9 @@
 mod args;
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use perl_build::{PatchPerl, PerlBuild, PerlReleases, extract_tarball, symlink_devel_executables};
+use perl_build::{PatchPerl, PerlBuild, PerlReleases, symlink_devel_executables};
 
 use args::{BuildArgs, Outcome};
 
@@ -81,35 +80,16 @@ where
     Ok(0)
 }
 
-/// How the Devel::PatchPerl fix-ups will be applied for this build.
-enum PatchStrategy {
-    /// Let `perl-build` drive the build, with this `patchperl` setting.
-    /// `PatchPerl::Auto` runs the external `patchperl` and warns+skips if it is
-    /// missing; `PatchPerl::Disabled` applies nothing.
-    PerlBuild(PatchPerl),
-    /// Obtain and unpack the source here, patch it in-process with the
-    /// `patch-perl` crate, then build the patched tree.
-    Internal,
-}
-
-/// Resolve `perlbuild.patch-perl` to a concrete strategy.
-fn patch_strategy(mode: crate::config::PatchPerlMode) -> PatchStrategy {
+/// Map `perlbuild.patch-perl` to the `perl-build` crate's [`PatchPerl`] setting.
+/// The crate applies the fix-ups itself — with the external `patchperl` or the
+/// in-process `patch-perl` port — so `upt` just forwards the choice.
+fn patch_perl_setting(mode: crate::config::PatchPerlMode) -> PatchPerl {
     use crate::config::PatchPerlMode;
     match mode {
-        PatchPerlMode::Off => PatchStrategy::PerlBuild(PatchPerl::Disabled),
-        PatchPerlMode::External => PatchStrategy::PerlBuild(PatchPerl::Auto),
-        PatchPerlMode::Internal => PatchStrategy::Internal,
-        PatchPerlMode::Auto => {
-            if which("patchperl").is_some() {
-                PatchStrategy::PerlBuild(PatchPerl::Auto)
-            } else {
-                log::warn!(
-                    "`patchperl` not found on PATH; applying Devel::PatchPerl fix-ups with the \
-                     bundled patch-perl crate"
-                );
-                PatchStrategy::Internal
-            }
-        }
+        PatchPerlMode::Auto => PatchPerl::Auto,
+        PatchPerlMode::External => PatchPerl::External,
+        PatchPerlMode::Internal => PatchPerl::Internal,
+        PatchPerlMode::Off => PatchPerl::Disabled,
     }
 }
 
@@ -138,7 +118,8 @@ async fn build(args: BuildArgs, mode: crate::config::PatchPerlMode) -> Result<()
 
     let mut perl_build = PerlBuild::new(&dest)
         .configure_options(configure_options)
-        .jobs(jobs);
+        .jobs(jobs)
+        .patchperl(patch_perl_setting(mode));
     if let Some(test) = test {
         perl_build = perl_build.test(test);
     }
@@ -149,61 +130,27 @@ async fn build(args: BuildArgs, mode: crate::config::PatchPerlMode) -> Result<()
         perl_build = perl_build.tarball_dir(tarball_dir);
     }
 
-    let built = match patch_strategy(mode) {
-        // `perl-build` drives the whole build; it applies (or skips) the
-        // Devel::PatchPerl fix-ups according to `setting`.
-        PatchStrategy::PerlBuild(setting) => {
-            perl_build = perl_build.patchperl(setting);
-            if is_blead {
-                perl_build
-                    .install_from_url(BLEAD_URL)
-                    .await
-                    .context("build from blead failed")?
-            } else if is_url(&stuff) {
-                perl_build
-                    .install_from_url(&stuff)
-                    .await
-                    .with_context(|| format!("build from {stuff} failed"))?
-            } else if is_tarball(&stuff) {
-                perl_build
-                    .install_from_tarball(&stuff)
-                    .with_context(|| format!("build from tarball {stuff} failed"))?
-            } else {
-                perl_build
-                    .install_from_cpan(&stuff)
-                    .await
-                    .with_context(|| format!("build of perl {stuff} failed"))?
-            }
-        }
-        // Obtain and unpack the source ourselves, apply the fix-ups in-process
-        // with the `patch-perl` crate, then build from the patched tree — no
-        // shelling out.
-        PatchStrategy::Internal => {
-            perl_build = perl_build.patchperl(PatchPerl::Disabled);
-
-            let tarball = obtain_tarball(&stuff, is_blead, tarball_dir.as_deref())
-                .await
-                .with_context(|| format!("obtaining the source for {stuff}"))?;
-
-            let build_root = match &build_dir {
-                Some(dir) => {
-                    std::fs::create_dir_all(dir).with_context(|| format!("creating {dir}"))?;
-                    PathBuf::from(dir)
-                }
-                None => temp_dir("src").context("creating a build directory")?,
-            };
-            let src = extract_tarball(&tarball, &build_root)
-                .with_context(|| format!("unpacking {}", tarball.display()))?;
-
-            patch_perl::PatchPerl::new()
-                .source(src.as_path())
-                .run()
-                .context("applying Devel::PatchPerl fix-ups")?;
-
-            perl_build
-                .install_from_source(&src)
-                .with_context(|| format!("build of {stuff} failed"))?
-        }
+    // `perl-build` drives the whole build — download / unpack / patch / build —
+    // applying the Devel::PatchPerl fix-ups per the `patchperl` setting above.
+    let built = if is_blead {
+        perl_build
+            .install_from_url(BLEAD_URL)
+            .await
+            .context("build from blead failed")?
+    } else if is_url(&stuff) {
+        perl_build
+            .install_from_url(&stuff)
+            .await
+            .with_context(|| format!("build from {stuff} failed"))?
+    } else if is_tarball(&stuff) {
+        perl_build
+            .install_from_tarball(&stuff)
+            .with_context(|| format!("build from tarball {stuff} failed"))?
+    } else {
+        perl_build
+            .install_from_cpan(&stuff)
+            .await
+            .with_context(|| format!("build of perl {stuff} failed"))?
     };
 
     if want_symlinks {
@@ -221,88 +168,6 @@ fn is_url(stuff: &str) -> bool {
 
 fn is_tarball(stuff: &str) -> bool {
     stuff.ends_with(".gz") || stuff.ends_with(".bz2") || stuff.ends_with(".xz")
-}
-
-/// Produce a local source tarball for `stuff`: a local tarball path is returned
-/// as-is; `blead`, a URL, or a CPAN version is downloaded (the version resolved
-/// through MetaCPAN) into `tarball_dir` (or a temp dir).
-async fn obtain_tarball(stuff: &str, is_blead: bool, tarball_dir: Option<&str>) -> Result<PathBuf> {
-    if !is_blead && !is_url(stuff) && is_tarball(stuff) {
-        return Ok(PathBuf::from(stuff));
-    }
-
-    let url = if is_blead {
-        BLEAD_URL.to_string()
-    } else if is_url(stuff) {
-        stuff.to_string()
-    } else {
-        let release = PerlReleases::new()
-            .find(stuff)
-            .await
-            .with_context(|| format!("resolving perl {stuff} on CPAN"))?;
-        log::info!(
-            "resolved perl {stuff} to {} ({})",
-            release.name,
-            release.download_url
-        );
-        release.download_url
-    };
-
-    let dir = match tarball_dir {
-        Some(dir) => {
-            std::fs::create_dir_all(dir).with_context(|| format!("creating {dir}"))?;
-            PathBuf::from(dir)
-        }
-        None => temp_dir("tarball").context("creating a download directory")?,
-    };
-    let dest = dir.join(url_filename(&url));
-    download(&url, &dest)
-        .await
-        .with_context(|| format!("downloading {url}"))?;
-    Ok(dest)
-}
-
-/// The file name to save a downloaded URL under.
-fn url_filename(url: &str) -> String {
-    url.split(['?', '#'])
-        .next()
-        .unwrap_or(url)
-        .rsplit('/')
-        .find(|segment| !segment.is_empty())
-        .unwrap_or("perl-source.tar.gz")
-        .to_string()
-}
-
-/// GET `url` and write the body to `dest`.
-async fn download(url: &str, dest: &Path) -> Result<()> {
-    let client = metacpan_api_modern::Client::builder()
-        .build()
-        .context("building the HTTP client")?;
-    let bytes = client
-        .http()
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
-    std::fs::write(dest, &bytes).with_context(|| format!("writing {}", dest.display()))?;
-    Ok(())
-}
-
-/// A fresh directory under the system temp directory, e.g.
-/// `.../upt-perlbuild-<kind>-<pid>-<nanos>`.
-fn temp_dir(kind: &str) -> std::io::Result<PathBuf> {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!(
-        "upt-perlbuild-{kind}-{}-{nanos}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
 }
 
 async fn definitions() -> Result<()> {
@@ -444,23 +309,27 @@ otherwise the bundled `patch-perl` crate in-process; `external` only ever runs
 
 #[cfg(test)]
 mod tests {
-    use super::{PatchStrategy, patch_strategy};
+    use super::patch_perl_setting;
     use crate::config::PatchPerlMode;
     use perl_build::PatchPerl;
 
     #[test]
-    fn explicit_modes_map_to_a_fixed_strategy() {
+    fn modes_forward_to_the_perl_build_patchperl_setting() {
         assert!(matches!(
-            patch_strategy(PatchPerlMode::Off),
-            PatchStrategy::PerlBuild(PatchPerl::Disabled)
+            patch_perl_setting(PatchPerlMode::Auto),
+            PatchPerl::Auto
         ));
         assert!(matches!(
-            patch_strategy(PatchPerlMode::External),
-            PatchStrategy::PerlBuild(PatchPerl::Auto)
+            patch_perl_setting(PatchPerlMode::External),
+            PatchPerl::External
         ));
         assert!(matches!(
-            patch_strategy(PatchPerlMode::Internal),
-            PatchStrategy::Internal
+            patch_perl_setting(PatchPerlMode::Internal),
+            PatchPerl::Internal
+        ));
+        assert!(matches!(
+            patch_perl_setting(PatchPerlMode::Off),
+            PatchPerl::Disabled
         ));
     }
 }

@@ -261,6 +261,8 @@ prefer = "auto"
 #   "metacpan" - resolve and download through the MetaCPAN API
 #   "mirror"   - fetch from a configured CPAN mirror
 source = "metacpan"
+mirror-base-url = "https://www.cpan.org/"          # used when source = "mirror"
+metacpan-base-url = "https://fastapi.metacpan.org/v1/"  # used when source = "metacpan"
 
 # Named perl-wrapper configurations for `upt perl`. Each [perl.<name>] table
 # builds one perl-wrapper object.

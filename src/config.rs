@@ -47,6 +47,10 @@ prefer = "auto"
 #   "metacpan" - resolve and download through the MetaCPAN API
 #   "mirror"   - fetch from a configured CPAN mirror
 source = "metacpan"
+# Base URL of the CPAN mirror used when source = "mirror".
+mirror-base-url = "https://www.cpan.org/"
+# Base URL of the MetaCPAN API used when source = "metacpan".
+metacpan-base-url = "https://fastapi.metacpan.org/v1/"
 
 # The [perl] section defines named perl-wrapper configurations for
 # `upt perl exec`. Each [perl.<name>] table builds one perl-wrapper object:
@@ -125,13 +129,43 @@ pub enum DistPrefer {
     Eumm,
 }
 
+/// Default value of `cpan.mirror-base-url`: the canonical CPAN mirror.
+pub const DEFAULT_MIRROR_BASE_URL: &str = "https://www.cpan.org/";
+
+/// Default value of `cpan.metacpan-base-url`: the MetaCPAN v1 API.
+pub const DEFAULT_METACPAN_BASE_URL: &str = "https://fastapi.metacpan.org/v1/";
+
 /// The `[cpan]` section: settings for `upt cpan`.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Cpan {
     /// Where `upt cpan install` fetches releases from.
     #[serde(default)]
     pub source: CpanSource,
+    /// Base URL of the CPAN mirror used when `source = "mirror"`.
+    #[serde(default = "default_mirror_base_url", rename = "mirror-base-url")]
+    pub mirror_base_url: String,
+    /// Base URL of the MetaCPAN API used when `source = "metacpan"`.
+    #[serde(default = "default_metacpan_base_url", rename = "metacpan-base-url")]
+    pub metacpan_base_url: String,
+}
+
+impl Default for Cpan {
+    fn default() -> Self {
+        Cpan {
+            source: CpanSource::default(),
+            mirror_base_url: default_mirror_base_url(),
+            metacpan_base_url: default_metacpan_base_url(),
+        }
+    }
+}
+
+fn default_mirror_base_url() -> String {
+    DEFAULT_MIRROR_BASE_URL.to_string()
+}
+
+fn default_metacpan_base_url() -> String {
+    DEFAULT_METACPAN_BASE_URL.to_string()
 }
 
 /// Value of `cpan.source`: where `upt cpan install` gets releases.
@@ -246,6 +280,8 @@ mod tests {
         assert_eq!(cfg.perlbuild.patch_perl, PatchPerlMode::Auto);
         assert_eq!(cfg.dist.prefer, DistPrefer::Auto);
         assert_eq!(cfg.cpan.source, CpanSource::Metacpan);
+        assert_eq!(cfg.cpan.mirror_base_url, DEFAULT_MIRROR_BASE_URL);
+        assert_eq!(cfg.cpan.metacpan_base_url, DEFAULT_METACPAN_BASE_URL);
     }
 
     #[test]
@@ -270,6 +306,36 @@ mod tests {
     fn rejects_unknown_cpan_source() {
         assert!(toml::from_str::<Config>("[cpan]\nsource = \"cpanm\"\n").is_err());
         assert!(toml::from_str::<Config>("[cpan]\nbogus = \"mirror\"\n").is_err());
+    }
+
+    #[test]
+    fn reads_cpan_base_urls_and_defaults_them() {
+        let cfg: Config = toml::from_str(
+            "[cpan]\n\
+             mirror-base-url = \"https://cpan.example/\"\n\
+             metacpan-base-url = \"https://api.example/v1/\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.cpan.mirror_base_url, "https://cpan.example/");
+        assert_eq!(cfg.cpan.metacpan_base_url, "https://api.example/v1/");
+
+        // Each key defaults independently when the other is set.
+        let only_mirror: Config =
+            toml::from_str("[cpan]\nmirror-base-url = \"https://cpan.example/\"\n").unwrap();
+        assert_eq!(only_mirror.cpan.mirror_base_url, "https://cpan.example/");
+        assert_eq!(
+            only_mirror.cpan.metacpan_base_url,
+            DEFAULT_METACPAN_BASE_URL
+        );
+
+        // Absent section: both keys take their defaults.
+        let empty: Config = toml::from_str("").unwrap();
+        assert_eq!(empty.cpan.mirror_base_url, DEFAULT_MIRROR_BASE_URL);
+        assert_eq!(empty.cpan.metacpan_base_url, DEFAULT_METACPAN_BASE_URL);
+
+        // The snake_case spellings are not accepted.
+        assert!(toml::from_str::<Config>("[cpan]\nmirror_base_url = \"x\"\n").is_err());
+        assert!(toml::from_str::<Config>("[cpan]\nmetacpan_base_url = \"x\"\n").is_err());
     }
 
     #[test]

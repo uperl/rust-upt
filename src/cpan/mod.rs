@@ -122,7 +122,7 @@ mod tests {
             database_path: None,
             patch_perl: crate::config::PatchPerlMode::Auto,
             dist_prefer: crate::config::DistPrefer::Auto,
-            cpan_source: crate::config::CpanSource::Metacpan,
+            cpan: crate::config::Cpan::default(),
             perl: crate::config::PerlSection::default(),
         };
         let err = super::install(&cx, install_args(&["install", "JSON::PP"]))

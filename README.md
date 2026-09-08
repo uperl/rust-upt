@@ -66,6 +66,12 @@ database, so re-running a step is cheap. `pre-configure` and `configure` also
 print a prerequisite table (only the unmet rows unless `--all-prereqs`).
 `--json` replaces the tables and live output with a single JSON envelope.
 
+### `upt perl <SUBCOMMAND>`
+
+Run a configured `perl` and manage the named `perl-wrapper` configurations in
+the `[perl.<name>]` sections of the config file. See [`upt perl`](#upt-perl)
+below for the individual subcommands.
+
 ## Drop-in replacements
 
 These built-ins reproduce the command-line interface of an existing CPAN tool.
@@ -89,6 +95,30 @@ replacement for [`patchperl`](https://metacpan.org/dist/Devel-PatchPerl).
 Takes the source tree (default `.`) and, optionally, the Perl version to patch
 as (otherwise read from `patchlevel.h`).
 
+## `upt perl`
+
+Work with the named [`perl-wrapper`][perl-wrapper] configurations in the
+`[perl.<name>]` sections of the config file.
+
+### `upt perl exec`
+
+Run `perl` through the wrapper built from a `[perl.<name>]` section.
+
+```
+upt perl exec [--perl <name>] [-- <perl options>...]
+```
+
+* `--perl <name>` selects the `[perl.<name>]` config section. Without it, the
+  section named by `perl.default` is used.
+* Everything after `--` is passed straight to `perl`.
+* The command exits with `perl`'s own status.
+
+```sh
+upt perl exec --perl dev -- -E 'say "$^X $]"'
+```
+
+[perl-wrapper]: https://github.com/uperl/rust-perl-wrapper
+
 ## External commands
 
 Any executable named `upt-<name>` on your `PATH` can be run as `upt <name>`,
@@ -97,7 +127,7 @@ with every following argument forwarded verbatim.
 ## Configuration
 
 `upt` writes a starter `config.toml` on first run and reads it on every
-invocation. It has two sections:
+invocation:
 
 ```toml
 [global]
@@ -111,6 +141,19 @@ color = "auto"
 #   "internal" - only the bundled patch-perl crate
 #   "off"      - apply no fix-ups
 patch-perl = "auto"
+
+# Named perl-wrapper configurations for `upt perl`. Each [perl.<name>] table
+# builds one perl-wrapper object.
+[perl]
+# The [perl.<name>] used when `upt perl exec` runs without `--perl`
+# (so a perl entry cannot itself be named "default").
+default = "dev"
+
+[perl.dev]
+perl = "/opt/perl-5.40/bin/perl"   # default: first `perl` on PATH
+make = "/usr/bin/gmake"            # default: first `make` on PATH
+install-base = "/home/me/perl5"    # local::lib / INSTALL_BASE prefix
+lib = ["/home/me/code/lib"]        # prepended to PERL5LIB
 ```
 
 Platform locations:

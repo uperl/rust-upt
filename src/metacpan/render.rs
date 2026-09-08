@@ -107,17 +107,12 @@ pub fn author(value: Value, color: bool) -> Result<()> {
     f.opt("city", &a.city);
     f.opt("region", &a.region);
     f.opt("country", &a.country);
-    if !a.profile.is_empty() {
-        let profiles = a
-            .profile
-            .iter()
-            .filter_map(|p| match (&p.name, &p.id) {
-                (Some(n), Some(i)) => Some(format!("{n}:{i}")),
-                (Some(n), None) => Some(n.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        f.list("profile", &profiles);
+    // One `profile <service>` row per entry, rather than a single joined cell.
+    for p in &a.profile {
+        let Some(name) = p.name.as_deref() else {
+            continue;
+        };
+        f.text(&format!("profile {name}"), p.id.as_deref().unwrap_or("-"));
     }
     if let Some(rc) = &a.release_count {
         f.text(

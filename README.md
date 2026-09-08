@@ -170,6 +170,22 @@ upt perl list
 upt perl list --json
 ```
 
+### `upt perl default`
+
+Print the name of `perl.default` — the section `upt perl exec` uses when it
+is run without `--perl`. Exits non-zero when `perl.default` is not set.
+
+```
+upt perl default [--json]
+```
+
+* `--json` (`-j`) prints the name as a single-element JSON array of strings.
+
+```sh
+upt perl default
+upt perl default --json
+```
+
 [perl-wrapper]: https://github.com/uperl/rust-perl-wrapper
 
 ## External commands

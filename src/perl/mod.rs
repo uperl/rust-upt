@@ -16,6 +16,7 @@
 //!   `upt perl exec` uses without `--perl`) at an already-registered
 //!   `[perl.<name>]`.
 //! * `upt perl list [--json]` prints the configured `[perl.<name>]` names.
+//! * `upt perl default [--json]` prints the name of `perl.default`.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -52,6 +53,7 @@ pub fn run(cx: &crate::Cx, args: &[String]) -> Result<i32> {
         } => register(cx, &perl_bin, &perl, make, install_base, lib),
         Command::Select { perl } => select(cx, &perl),
         Command::List { json } => list(cx, json),
+        Command::Default { json } => default(cx, json),
     }
 }
 
@@ -128,6 +130,16 @@ enum Command {
     /// Names are printed one per line, sorted. `perl.default` is not shown.
     List {
         /// Print the names as a JSON array of strings instead of one per line.
+        #[arg(long, short = 'j')]
+        json: bool,
+    },
+
+    /// Print the name of `perl.default` from the config file.
+    ///
+    /// This is the section `upt perl exec` runs when it is invoked without
+    /// `--perl`. Exits non-zero when `perl.default` is not set.
+    Default {
+        /// Print the name as a single-element JSON array of strings.
         #[arg(long, short = 'j')]
         json: bool,
     },
@@ -245,6 +257,19 @@ fn select(cx: &crate::Cx, name: &str) -> Result<i32> {
 fn list(cx: &crate::Cx, as_json: bool) -> Result<i32> {
     let names: Vec<&str> = cx.perl.perls.keys().map(String::as_str).collect();
     print!("{}", render_list(&names, as_json, cx.style.enabled()));
+    Ok(0)
+}
+
+/// `upt perl default`: print the name of `perl.default` (the section
+/// `upt perl exec` uses without `--perl`).
+fn default(cx: &crate::Cx, as_json: bool) -> Result<i32> {
+    let name = cx.perl.default.as_deref().ok_or_else(|| {
+        anyhow!(
+            "no `perl.default` set in {}; set one with `upt perl select`",
+            cx.config_path.display()
+        )
+    })?;
+    print!("{}", render_list(&[name], as_json, cx.style.enabled()));
     Ok(0)
 }
 
@@ -639,6 +664,27 @@ mod tests {
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v, serde_json::json!(["dev", "sys"]));
         assert_eq!(render_list(&[], true, false).trim(), "[]");
+        // `upt perl default --json` reuses this: one name -> one-element array.
+        let one: Value = serde_json::from_str(&render_list(&["dev"], true, false)).unwrap();
+        assert_eq!(one, serde_json::json!(["dev"]));
+    }
+
+    #[test]
+    fn default_errors_when_perl_default_is_unset() {
+        let cx = cx_with(crate::config::PerlSection::default());
+        let err = default(&cx, false).unwrap_err().to_string();
+        assert!(err.contains("perl.default"), "{err}");
+        assert!(err.contains("/tmp/upt/config.toml"), "{err}");
+    }
+
+    #[test]
+    fn default_prints_the_configured_name() {
+        let section = crate::config::PerlSection {
+            default: Some("dev".to_string()),
+            ..Default::default()
+        };
+        let cx = cx_with(section);
+        assert_eq!(default(&cx, false).unwrap(), 0);
     }
 
     #[test]

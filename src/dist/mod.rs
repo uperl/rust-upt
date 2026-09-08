@@ -180,10 +180,11 @@ impl From<crate::config::DistPrefer> for Prefer {
     }
 }
 
-// `next_display_order = None` makes clap list the subcommands in `--help`
-// alphabetically rather than in declaration order, matching `upt help`.
+// Unlike the other subcommand groups, `upt dist --help` keeps declaration
+// order: the steps form a pipeline (`pre-configure` -> `configure` -> `build`
+// -> `test` -> `install`, then the two cleanup steps), and listing them in
+// that order is more useful than alphabetically.
 #[derive(Debug, Subcommand)]
-#[command(next_display_order = None)]
 enum Command {
     /// Print the prerequisites that must be installed before `configure` can run
     /// (the distribution's `configure` requires, plus the build tool itself), as
@@ -1003,17 +1004,19 @@ mod tests {
     use std::cmp::Ordering;
 
     #[test]
-    fn help_lists_subcommands_alphabetically() {
+    fn help_lists_subcommands_in_pipeline_order() {
+        // `upt dist` deliberately keeps declaration order (the build pipeline),
+        // unlike the alphabetised listings elsewhere.
         use clap::CommandFactory;
         let help = Cli::command().render_long_help().to_string();
         let order = [
-            "build",
-            "clean",
-            "configure",
-            "distclean",
-            "install",
             "pre-configure",
+            "configure",
+            "build",
             "test",
+            "install",
+            "clean",
+            "distclean",
         ];
         let positions: Vec<usize> = order
             .iter()
@@ -1025,7 +1028,7 @@ mod tests {
             .collect();
         assert!(
             positions.windows(2).all(|w| w[0] < w[1]),
-            "subcommands not in alphabetical order: {help}"
+            "subcommands not in pipeline order: {help}"
         );
     }
 

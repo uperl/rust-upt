@@ -12,6 +12,9 @@
 //!   own status.
 //! * `upt perl register <perl binary> --perl <name> [...]` adds a new
 //!   `[perl.<name>]` section to the config file.
+//! * `upt perl select --perl <name>` points `perl.default` (the section
+//!   `upt perl exec` uses without `--perl`) at an already-registered
+//!   `[perl.<name>]`.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -44,6 +47,7 @@ pub fn run(cx: &crate::Cx, args: &[String]) -> Result<i32> {
             install_base,
             lib,
         } => register(cx, &perl_bin, &perl, make, install_base, lib),
+        Command::Select { perl } => select(cx, &perl),
     }
 }
 
@@ -103,6 +107,16 @@ enum Command {
         /// Directory to prepend to `PERL5LIB`; repeatable.
         #[arg(long = "lib", value_name = "DIR")]
         lib: Vec<PathBuf>,
+    },
+
+    /// Set `perl.default` in the config file to an existing `[perl.<name>]`.
+    ///
+    /// `perl.default` is the section `upt perl exec` runs when it is invoked
+    /// without `--perl`. The name given by `--perl` must already be registered.
+    Select {
+        /// Name of the `[perl.<name>]` section to make the default.
+        #[arg(long, value_name = "NAME", required = true)]
+        perl: String,
     },
 }
 
@@ -180,27 +194,57 @@ fn register(
 
     // Start from the current file (or the starter template when there is none)
     // so comments and unrelated sections are preserved.
-    let base = match std::fs::read_to_string(&cx.config_path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            crate::config::DEFAULT_FILE.to_string()
-        }
-        Err(err) => {
-            return Err(anyhow::Error::new(err))
-                .with_context(|| format!("reading {}", cx.config_path.display()));
-        }
-    };
-
+    let base = read_config_or_template(&cx.config_path)?;
     let updated = insert_perl_section(&base, name, &entry)?;
-
-    if let Some(parent) = cx.config_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    std::fs::write(&cx.config_path, updated)
-        .with_context(|| format!("writing {}", cx.config_path.display()))?;
+    write_config(&cx.config_path, &updated)?;
 
     println!("registered `[perl.{name}]` in {}", cx.config_path.display());
     Ok(0)
+}
+
+/// `upt perl select`: point `perl.default` at an already-registered
+/// `[perl.<name>]` section.
+fn select(cx: &crate::Cx, name: &str) -> Result<i32> {
+    if name == "default" {
+        bail!("`default` is a reserved key in the [perl] section and cannot name a perl");
+    }
+    if !cx.perl.perls.contains_key(name) {
+        bail!(
+            "no `[perl.{name}]` section in {}{}; add one with `upt perl register` first",
+            cx.config_path.display(),
+            available(cx)
+        );
+    }
+
+    let base = read_config_or_template(&cx.config_path)?;
+    let updated = set_perl_default(&base, name)?;
+    write_config(&cx.config_path, &updated)?;
+
+    println!(
+        "`perl.default` is now `{name}` in {}",
+        cx.config_path.display()
+    );
+    Ok(0)
+}
+
+/// Read the current config file text, falling back to the starter template when
+/// the file does not exist yet so a rewrite still keeps its comments.
+fn read_config_or_template(path: &Path) -> Result<String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Ok(crate::config::DEFAULT_FILE.to_string())
+        }
+        Err(err) => Err(anyhow::Error::new(err).context(format!("reading {}", path.display()))),
+    }
+}
+
+/// Write `text` to the config file, creating the parent directory if needed.
+fn write_config(path: &Path, text: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
 }
 
 /// Query `$Config{make}` from `perl_bin` (`perl -MConfig -e 'print
@@ -283,6 +327,34 @@ fn insert_perl_section(base: &str, name: &str, entry: &RegisterEntry) -> Result<
     }
 
     perl.insert(name, Item::Table(table));
+
+    Ok(doc.to_string())
+}
+
+/// Set the reserved `default` key of the `[perl]` table in the TOML document
+/// `base` to `name`, returning the new file text. An existing `perl.default` is
+/// replaced in place; comments and unrelated content are preserved.
+fn set_perl_default(base: &str, name: &str) -> Result<String> {
+    use toml_edit::{DocumentMut, Item, Table, value};
+
+    let mut doc: DocumentMut = base
+        .parse()
+        .context("the existing config file is not valid TOML")?;
+
+    if doc.get("perl").is_none() {
+        doc.insert("perl", Item::Table(Table::new()));
+    }
+
+    let perl = doc["perl"]
+        .as_table_mut()
+        .context("the `perl` config entry is not a table")?;
+
+    // `default` is a leaf key on `[perl]`, so the header has to be emitted even
+    // when the table otherwise holds only `[perl.<name>]` sub-tables. toml_edit
+    // renders a table's own key/value pairs above its child tables, so the new
+    // key lands above any `[perl.<name>]` headers rather than inside one.
+    perl.set_implicit(false);
+    perl.insert("default", value(name));
 
     Ok(doc.to_string())
 }
@@ -464,6 +536,64 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("reserved"), "{err}");
+    }
+
+    #[test]
+    fn select_rejects_the_reserved_default_name() {
+        let cx = cx_with(crate::config::PerlSection::default());
+        let err = select(&cx, "default").unwrap_err().to_string();
+        assert!(err.contains("reserved"), "{err}");
+    }
+
+    #[test]
+    fn select_rejects_an_unregistered_name() {
+        let mut section = crate::config::PerlSection::default();
+        section
+            .perls
+            .insert("alpha".to_string(), PerlConfig::default());
+        let cx = cx_with(section);
+
+        let err = select(&cx, "beta").unwrap_err().to_string();
+        assert!(err.contains("[perl.beta]"), "{err}");
+        assert!(err.contains("available: alpha"), "{err}");
+        assert!(err.contains("register"), "{err}");
+    }
+
+    #[test]
+    fn set_default_replaces_an_existing_value_in_place() {
+        let base =
+            "[perl]\ndefault = \"a\"\n\n[perl.a]\nperl = \"/a\"\n\n[perl.b]\nperl = \"/b\"\n";
+        let out = set_perl_default(base, "b").unwrap();
+
+        let cfg = parse(&out);
+        assert_eq!(cfg.perl.default.as_deref(), Some("b"));
+        assert!(cfg.perl.perls.contains_key("a"));
+        assert!(cfg.perl.perls.contains_key("b"));
+    }
+
+    #[test]
+    fn set_default_adds_the_key_above_existing_perl_sub_tables() {
+        // No explicit `[perl]` header, only sub-tables: the new `default` key
+        // must not be swallowed by `[perl.dev]`.
+        let base = "[perl.dev]\nperl = \"/dev\"\n";
+        let out = set_perl_default(base, "dev").unwrap();
+
+        let cfg = parse(&out);
+        assert_eq!(cfg.perl.default.as_deref(), Some("dev"));
+        assert_eq!(
+            cfg.perl.perls["dev"].perl.as_deref(),
+            Some(Path::new("/dev"))
+        );
+    }
+
+    #[test]
+    fn set_default_into_the_starter_template_round_trips() {
+        let out = set_perl_default(crate::config::DEFAULT_FILE, "dev").unwrap();
+        let cfg = parse(&out);
+        assert_eq!(cfg.perl.default.as_deref(), Some("dev"));
+        // The starter template's other sections still load.
+        assert_eq!(cfg.global.color, crate::config::ColorChoice::Auto);
+        assert_eq!(cfg.perlbuild.patch_perl, crate::config::PatchPerlMode::Auto);
     }
 
     #[test]

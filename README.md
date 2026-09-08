@@ -137,6 +137,23 @@ upt perl register /opt/perl-5.40/bin/perl --perl dev \
     --install-base ~/perl5 --lib ~/code/lib
 ```
 
+### `upt perl select`
+
+Point `perl.default` at an already-registered `[perl.<name>]` — the section
+`upt perl exec` uses when it is run without `--perl` (comments and other
+sections are preserved).
+
+```
+upt perl select --perl <name>
+```
+
+* `--perl <name>` is required and must already be a `[perl.<name>]` in the
+  config (register it first; the reserved name `default` is rejected).
+
+```sh
+upt perl select --perl dev
+```
+
 [perl-wrapper]: https://github.com/uperl/rust-perl-wrapper
 
 ## External commands

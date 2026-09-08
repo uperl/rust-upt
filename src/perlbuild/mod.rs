@@ -13,9 +13,10 @@
 mod args;
 
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use perl_build::{PerlBuild, PerlReleases, symlink_devel_executables};
+use perl_build::{PatchPerl, PerlBuild, PerlReleases, extract_tarball, symlink_devel_executables};
 
 use args::{BuildArgs, Outcome};
 
@@ -116,25 +117,61 @@ async fn build(args: BuildArgs) -> Result<()> {
         perl_build = perl_build.tarball_dir(tarball_dir);
     }
 
-    let built = if is_blead {
-        perl_build
-            .install_from_url(BLEAD_URL)
-            .await
-            .context("build from blead failed")?
-    } else if stuff.starts_with("http://") || stuff.starts_with("https://") {
-        perl_build
-            .install_from_url(&stuff)
-            .await
-            .with_context(|| format!("build from {stuff} failed"))?
-    } else if stuff.ends_with(".gz") || stuff.ends_with(".bz2") || stuff.ends_with(".xz") {
-        perl_build
-            .install_from_tarball(&stuff)
-            .with_context(|| format!("build from tarball {stuff} failed"))?
+    let built = if which("patchperl").is_some() {
+        // `patchperl` is on PATH — let `perl-build` drive the whole build; it
+        // shells out to `patchperl` for the Devel::PatchPerl fix-ups.
+        if is_blead {
+            perl_build
+                .install_from_url(BLEAD_URL)
+                .await
+                .context("build from blead failed")?
+        } else if is_url(&stuff) {
+            perl_build
+                .install_from_url(&stuff)
+                .await
+                .with_context(|| format!("build from {stuff} failed"))?
+        } else if is_tarball(&stuff) {
+            perl_build
+                .install_from_tarball(&stuff)
+                .with_context(|| format!("build from tarball {stuff} failed"))?
+        } else {
+            perl_build
+                .install_from_cpan(&stuff)
+                .await
+                .with_context(|| format!("build of perl {stuff} failed"))?
+        }
     } else {
-        perl_build
-            .install_from_cpan(&stuff)
+        // No `patchperl` on PATH: obtain and unpack the source ourselves, apply
+        // the Devel::PatchPerl fix-ups in-process with the `patch-perl` crate,
+        // then build from the patched tree — no shelling out.
+        log::info!(
+            "`patchperl` not found on PATH; applying Devel::PatchPerl fix-ups with the \
+             bundled patch-perl crate"
+        );
+        perl_build = perl_build.patchperl(PatchPerl::Disabled);
+
+        let tarball = obtain_tarball(&stuff, is_blead, tarball_dir.as_deref())
             .await
-            .with_context(|| format!("build of perl {stuff} failed"))?
+            .with_context(|| format!("obtaining the source for {stuff}"))?;
+
+        let build_root = match &build_dir {
+            Some(dir) => {
+                std::fs::create_dir_all(dir).with_context(|| format!("creating {dir}"))?;
+                PathBuf::from(dir)
+            }
+            None => temp_dir("src").context("creating a build directory")?,
+        };
+        let src = extract_tarball(&tarball, &build_root)
+            .with_context(|| format!("unpacking {}", tarball.display()))?;
+
+        patch_perl::PatchPerl::new()
+            .source(src.as_path())
+            .run()
+            .context("applying Devel::PatchPerl fix-ups")?;
+
+        perl_build
+            .install_from_source(&src)
+            .with_context(|| format!("build of {stuff} failed"))?
     };
 
     if want_symlinks {
@@ -144,6 +181,96 @@ async fn build(args: BuildArgs) -> Result<()> {
 
     println!("perl installed in {}", built.prefix().display());
     Ok(())
+}
+
+fn is_url(stuff: &str) -> bool {
+    stuff.starts_with("http://") || stuff.starts_with("https://")
+}
+
+fn is_tarball(stuff: &str) -> bool {
+    stuff.ends_with(".gz") || stuff.ends_with(".bz2") || stuff.ends_with(".xz")
+}
+
+/// Produce a local source tarball for `stuff`: a local tarball path is returned
+/// as-is; `blead`, a URL, or a CPAN version is downloaded (the version resolved
+/// through MetaCPAN) into `tarball_dir` (or a temp dir).
+async fn obtain_tarball(stuff: &str, is_blead: bool, tarball_dir: Option<&str>) -> Result<PathBuf> {
+    if !is_blead && !is_url(stuff) && is_tarball(stuff) {
+        return Ok(PathBuf::from(stuff));
+    }
+
+    let url = if is_blead {
+        BLEAD_URL.to_string()
+    } else if is_url(stuff) {
+        stuff.to_string()
+    } else {
+        let release = PerlReleases::new()
+            .find(stuff)
+            .await
+            .with_context(|| format!("resolving perl {stuff} on CPAN"))?;
+        log::info!(
+            "resolved perl {stuff} to {} ({})",
+            release.name,
+            release.download_url
+        );
+        release.download_url
+    };
+
+    let dir = match tarball_dir {
+        Some(dir) => {
+            std::fs::create_dir_all(dir).with_context(|| format!("creating {dir}"))?;
+            PathBuf::from(dir)
+        }
+        None => temp_dir("tarball").context("creating a download directory")?,
+    };
+    let dest = dir.join(url_filename(&url));
+    download(&url, &dest)
+        .await
+        .with_context(|| format!("downloading {url}"))?;
+    Ok(dest)
+}
+
+/// The file name to save a downloaded URL under.
+fn url_filename(url: &str) -> String {
+    url.split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or("perl-source.tar.gz")
+        .to_string()
+}
+
+/// GET `url` and write the body to `dest`.
+async fn download(url: &str, dest: &Path) -> Result<()> {
+    let client = metacpan_api_modern::Client::builder()
+        .build()
+        .context("building the HTTP client")?;
+    let bytes = client
+        .http()
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+    std::fs::write(dest, &bytes).with_context(|| format!("writing {}", dest.display()))?;
+    Ok(())
+}
+
+/// A fresh directory under the system temp directory, e.g.
+/// `.../upt-perlbuild-<kind>-<pid>-<nanos>`.
+fn temp_dir(kind: &str) -> std::io::Result<PathBuf> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!(
+        "upt-perlbuild-{kind}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
 }
 
 async fn definitions() -> Result<()> {
@@ -199,9 +326,10 @@ fn print_version() {
         .unwrap_or_else(|| "?".to_string());
     println!("{} {} ({exe})", prog(), env!("CARGO_PKG_VERSION"));
     println!("backend: perl-build <https://github.com/uperl/rust-perl-build>");
+    println!("patch-perl: <https://github.com/uperl/rust-patch-perl> (bundled fallback)");
     match which("patchperl") {
-        Some(path) => println!("patchperl: {}", path.display()),
-        None => println!("patchperl: not found on PATH (older perls may fail to build)"),
+        Some(path) => println!("patchperl: {} (preferred when present)", path.display()),
+        None => println!("patchperl: not found on PATH — using the bundled patch-perl"),
     }
 }
 
@@ -258,9 +386,9 @@ OPTIONS:
     --version           print version information, then exit
     -h, --help          print this help, then exit
 
-Devel::PatchPerl fix-ups are applied by shelling out to `patchperl` when it is
-on PATH (install it with `cpanm App::patchperl`); without it, older perls may
-fail to build on a modern toolchain.
+Devel::PatchPerl fix-ups are applied through the `patchperl` program when it is
+on PATH; otherwise the bundled `patch-perl` crate applies them in-process, so
+no external `patchperl` is required.
 ",
         p = prog()
     )

@@ -14,8 +14,9 @@ cpan-distribution-build = { git = "https://github.com/uperl/rust-cpan-distributi
 dirs = "6"
 env_logger = "0.11"
 hex = "0.4"
+log = "0.4"
 metacpan-api-modern = { git = "https://github.com/uperl/rust-metacpan-api-modern", tag = "v0.3.0" }
-patch-perl = { git = "https://github.com/uperl/rust-patch-perl", branch = "graham/impl" }
+patch-perl = { version = "0.1.2", git = "https://github.com/uperl/rust-patch-perl", tag = "v0.1.2" }
 perl-build = { version = "0.1.2", git = "https://github.com/uperl/rust-perl-build", tag = "v0.1.2" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }

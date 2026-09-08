@@ -974,8 +974,8 @@ dependencies = [
 
 [[package]]
 name = "patch-perl"
-version = "0.1.0"
-source = "git+https://github.com/uperl/rust-patch-perl?branch=graham%2Fimpl#a63c1d0531026a92adfe9a8d31ac004088792fe5"
+version = "0.1.2"
+source = "git+https://github.com/uperl/rust-patch-perl?tag=v0.1.2#fc9fd0287e3b93320d4135447e8d72222ab8792e"
 dependencies = [
  "libloading",
  "log",
@@ -1755,6 +1755,7 @@ dependencies = [
  "dirs",
  "env_logger",
  "hex",
+ "log",
  "metacpan-api-modern",
  "patch-perl",
  "perl-build",

@@ -1,9 +1,10 @@
-//! The user config file: `config.toml` with `[global]` and `[perlbuild]`
-//! sections.
+//! The user config file: `config.toml` with `[global]`, `[perlbuild]` and
+//! `[perl.<name>]` sections.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -29,6 +30,24 @@ color = "auto"
 #   "internal" - only the bundled patch-perl crate
 #   "off"      - do not apply any fix-ups
 patch-perl = "auto"
+
+# The [perl] section defines named perl-wrapper configurations for
+# `upt perl exec`. Each [perl.<name>] table builds one perl-wrapper object:
+#
+#   [perl.system]
+#   perl = "/usr/bin/perl"
+#
+#   [perl.dev]
+#   perl = "/opt/perl-5.40/bin/perl"
+#   make = "/usr/bin/gmake"
+#   install-base = "/home/me/perl5"
+#   lib = ["/home/me/code/lib"]
+#
+# `perl.default` names the [perl.<name>] that `upt perl exec` runs when it is
+# invoked without `--perl` (so a perl entry cannot itself be named "default"):
+#
+#   [perl]
+#   default = "dev"
 "#;
 
 /// The parsed contents of `config.toml`.
@@ -39,6 +58,8 @@ pub struct Config {
     pub global: Global,
     #[serde(default)]
     pub perlbuild: Perlbuild,
+    #[serde(default)]
+    pub perl: PerlSection,
 }
 
 /// The `[global]` section.
@@ -56,6 +77,41 @@ pub struct Perlbuild {
     /// How `upt perlbuild` applies Devel::PatchPerl fix-ups.
     #[serde(default, rename = "patch-perl")]
     pub patch_perl: PatchPerlMode,
+}
+
+/// The `[perl]` section: named `perl-wrapper` configurations for `upt perl
+/// exec`, plus the name of the one it uses when `--perl` is not given.
+///
+/// `default` is a reserved key holding `perl.default`; every other key is a
+/// `[perl.<name>]` sub-table describing one `perl-wrapper` object.
+#[derive(Debug, Default, Deserialize)]
+pub struct PerlSection {
+    /// `perl.default`: the `[perl.<name>]` entry `upt perl exec` runs when it is
+    /// invoked without `--perl`. `None` when the config does not set it.
+    pub default: Option<String>,
+    /// Every `[perl.<name>]` sub-table, keyed by `<name>`.
+    #[serde(flatten)]
+    pub perls: BTreeMap<String, PerlConfig>,
+}
+
+/// One `[perl.<name>]` sub-table: the inputs used to build a
+/// [`perl_wrapper::Perl`]. Every field is optional; an empty table builds a
+/// wrapper around the first `perl` (and `make`) on `PATH`.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PerlConfig {
+    /// Path to the `perl` executable. When omitted, the first `perl` on `PATH`
+    /// is used.
+    pub perl: Option<PathBuf>,
+    /// Path to `make`. When omitted, the first `make` on `PATH` is used.
+    pub make: Option<PathBuf>,
+    /// Install prefix for newly built modules, `local::lib` / `INSTALL_BASE`
+    /// style. When omitted, the interpreter's own directories are used.
+    #[serde(rename = "install-base")]
+    pub install_base: Option<PathBuf>,
+    /// Directories to prepend to `PERL5LIB` when running `perl`.
+    #[serde(default)]
+    pub lib: Vec<PathBuf>,
 }
 
 /// Value of `perlbuild.patch-perl`: which Devel::PatchPerl implementation
@@ -161,5 +217,61 @@ mod tests {
     #[test]
     fn rejects_unknown_key() {
         assert!(toml::from_str::<Config>("[global]\ncolour = \"on\"\n").is_err());
+    }
+
+    #[test]
+    fn perl_section_defaults_to_empty() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.perl.default.is_none());
+        assert!(cfg.perl.perls.is_empty());
+    }
+
+    #[test]
+    fn reads_named_perls_and_default() {
+        let cfg: Config = toml::from_str(
+            "[perl]\n\
+             default = \"dev\"\n\
+             [perl.system]\n\
+             perl = \"/usr/bin/perl\"\n\
+             [perl.dev]\n\
+             perl = \"/opt/perl/bin/perl\"\n\
+             make = \"/usr/bin/gmake\"\n\
+             install-base = \"/home/me/perl5\"\n\
+             lib = [\"/a\", \"/b\"]\n",
+        )
+        .unwrap();
+
+        assert_eq!(cfg.perl.default.as_deref(), Some("dev"));
+        assert_eq!(cfg.perl.perls.len(), 2);
+
+        let system = &cfg.perl.perls["system"];
+        assert_eq!(system.perl.as_deref(), Some(Path::new("/usr/bin/perl")));
+        assert!(system.make.is_none());
+        assert!(system.lib.is_empty());
+
+        let dev = &cfg.perl.perls["dev"];
+        assert_eq!(dev.perl.as_deref(), Some(Path::new("/opt/perl/bin/perl")));
+        assert_eq!(dev.make.as_deref(), Some(Path::new("/usr/bin/gmake")));
+        assert_eq!(
+            dev.install_base.as_deref(),
+            Some(Path::new("/home/me/perl5"))
+        );
+        assert_eq!(dev.lib, [PathBuf::from("/a"), PathBuf::from("/b")]);
+    }
+
+    #[test]
+    fn rejects_unknown_key_in_a_named_perl() {
+        assert!(
+            toml::from_str::<Config>("[perl.dev]\ninstall_base = \"/x\"\n").is_err(),
+            "the key is `install-base`, not `install_base`"
+        );
+        assert!(toml::from_str::<Config>("[perl.dev]\nbogus = \"/x\"\n").is_err());
+    }
+
+    #[test]
+    fn starter_file_has_no_active_perl_section() {
+        let cfg: Config = toml::from_str(DEFAULT_FILE).unwrap();
+        assert!(cfg.perl.default.is_none());
+        assert!(cfg.perl.perls.is_empty());
     }
 }

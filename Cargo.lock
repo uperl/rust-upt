@@ -1759,6 +1759,7 @@ dependencies = [
  "metacpan-api-modern",
  "patch-perl",
  "perl-build",
+ "perl-wrapper",
  "rusqlite",
  "serde",
  "serde_json",

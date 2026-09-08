@@ -58,6 +58,13 @@ pub static BUILTINS: &[Builtin] = &[
         run: crate::dist::run,
     },
     Builtin {
+        name: "perl",
+        summary: "Run perl through a configured perl-wrapper",
+        legacy_name: None,
+        help: None,
+        run: crate::perl::run,
+    },
+    Builtin {
         name: "perlbuild",
         summary: "Build and install a perl from source",
         legacy_name: Some("perl-build"),

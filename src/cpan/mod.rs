@@ -16,7 +16,8 @@
 //!   and `suggests` prerequisites of every phase, recursively, as though they
 //!   were `requires` (so a failure to install one is fatal); `--try-recommended`
 //!   and `--try-suggested` attempt the same prerequisites but log and skip any
-//!   that fail to install.
+//!   that fail to install. `--pure-perl` builds every distribution without
+//!   compiling XS (`PUREPERL_ONLY=1` / `--pureperl-only` at the configure step).
 //!
 //! # Resolution
 //!
@@ -227,6 +228,12 @@ struct InstallArgs {
     /// log it and carry on without them.
     #[arg(long = "try-suggested")]
     try_suggest: bool,
+
+    /// Build every distribution in pure Perl, without compiling XS: pass
+    /// `PUREPERL_ONLY=1` to `Makefile.PL` (or `--pureperl-only` to `Build.PL`)
+    /// at the configure step.
+    #[arg(long = "pure-perl", visible_alias = "pureperl")]
+    pure_perl: bool,
 }
 
 /// `upt cpan install`: set up the run directory, then walk each SPEC through the
@@ -290,6 +297,7 @@ fn install(cx: &crate::Cx, common: &CommonArgs, args: InstallArgs) -> Result<i32
             suggest: args.suggest,
             try_recommend: args.try_recommend,
             try_suggest: args.try_suggest,
+            pure_perl: args.pure_perl,
             source: resolved.source,
             mirror_base_url: resolved.mirror_base_url,
             packages,
@@ -550,6 +558,9 @@ struct Installer {
     /// Attempt every phase's `suggests` prerequisites, but keep going without
     /// any that fail to install (`--try-suggested`).
     try_suggest: bool,
+    /// Build every distribution without compiling XS, via
+    /// `Distribution::with_pure_perl` (`--pure-perl`).
+    pure_perl: bool,
     source: CpanSource,
     mirror_base_url: String,
     /// The mirror's `02packages.details.txt` index, loaded once when
@@ -793,14 +804,17 @@ impl Installer {
         out
     }
 
-    /// Open the unpacked distribution in `dir`, honouring `dist.prefer`.
+    /// Open the unpacked distribution in `dir`, honouring `dist.prefer` and
+    /// `--pure-perl`.
     fn open_distribution(&self, dir: &Path) -> Result<Distribution> {
         let perl = self.perl.clone();
         let opened = match self.prefer {
             None => Distribution::new(dir, perl),
             Some(tool) => Distribution::with_preference(dir, perl, tool),
         };
-        opened.with_context(|| format!("opening the distribution in {}", dir.display()))
+        opened
+            .map(|dist| dist.with_pure_perl(self.pure_perl))
+            .with_context(|| format!("opening the distribution in {}", dir.display()))
     }
 
     /// Resolve a top-level SPEC (a module *or* distribution name).
@@ -1349,6 +1363,14 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn install_accepts_the_pure_perl_flag() {
+        assert!(!install_args(&["install", "JSON::PP"]).pure_perl);
+        assert!(install_args(&["install", "--pure-perl", "JSON::PP"]).pure_perl);
+        // `--pureperl` is accepted as an alias.
+        assert!(install_args(&["install", "--pureperl", "JSON::PP"]).pure_perl);
     }
 
     #[test]

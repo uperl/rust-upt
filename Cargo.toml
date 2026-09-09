@@ -1,6 +1,6 @@
 [package]
 name = "upt"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 description = "Unified Perl Tool"
 repository = "https://github.com/uperl/upt"
@@ -10,7 +10,7 @@ license = "MIT"
 anyhow = "1.0.104"
 clap = { version = "4", features = ["derive"] }
 comfy-table = "7"
-cpan-distribution-build = { git = "https://github.com/uperl/rust-cpan-distribution-build.git", tag = "v0.2.1" }
+cpan-distribution-build = { git = "https://github.com/uperl/rust-cpan-distribution-build.git", tag = "v0.2.2", version = "0.2.2" }
 cpan-distribution-extractor = { git = "https://github.com/uperl/rust-cpan-distribution-extractor", tag = "v0.1.1", version = "0.1.1" }
 cpan-packagedetails = { git = "https://github.com/uperl/rust-cpan-packagedetails", tag = "v0.1.1" }
 dirs = "6"

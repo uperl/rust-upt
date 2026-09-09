@@ -79,7 +79,15 @@ distribution name), download and unpack the release, then run the
 prerequisites discovered at the `pre-configure` and `configure` steps. `--perl
 <name>` selects the interpreter to build with (without it, `perl.default`);
 `--no-test` (alias `--no-tests`) skips the test suite and does not install
-`test`-phase prerequisites.
+`test`-phase prerequisites. `--recommended` and `--suggested` also install the
+`recommends` and `suggests` prerequisites of every phase, recursively, as though
+they were `requires` — so a failure to install one aborts the run.
+`--try-recommended` and `--try-suggested` attempt the same prerequisites but log
+and step over any that fail, so the run keeps going without them. (`--recommended`
+conflicts with `--try-recommended`, and `--suggested` with `--try-suggested`.)
+`--pure-perl` (alias `--pureperl`) builds every distribution without compiling
+XS, passing `PUREPERL_ONLY=1` to `Makefile.PL` or `--pureperl-only` to `Build.PL`
+at the configure step.
 
 Resolution follows `cpan.source`. With `metacpan` (the default) each SPEC goes
 through the MetaCPAN `download_url` API. With `mirror`, the mirror's own index

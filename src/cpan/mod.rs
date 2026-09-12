@@ -79,6 +79,8 @@ use sha2::{Digest, Sha256};
 
 use crate::config::CpanSource;
 
+mod pause;
+
 /// `User-Agent` sent with every MetaCPAN request and tarball download.
 const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
@@ -328,8 +330,13 @@ fn install(cx: &crate::Cx, common: &CommonArgs, args: InstallArgs) -> Result<i32
 
 /// `upt cpan upload`: upload one or more distribution tarballs to PAUSE.
 ///
-/// Stub — not yet implemented.
+/// Stub — loads and validates PAUSE credentials from `~/.pause`, but the
+/// actual upload is not yet implemented.
 fn upload(_cx: &crate::Cx, _common: &CommonArgs, _args: UploadArgs) -> Result<i32> {
+    let path = pause::default_path()?;
+    let _credentials = pause::read(&path)
+        .with_context(|| format!("loading PAUSE credentials from {}", path.display()))?;
+
     bail!("upt cpan upload is not yet implemented");
 }
 
@@ -1310,6 +1317,7 @@ mod tests {
     fn install_args(args: &[&str]) -> InstallArgs {
         match parse(args).command {
             Command::Install(args) => args,
+            Command::Upload(_) => panic!("expected an `install` command"),
         }
     }
 

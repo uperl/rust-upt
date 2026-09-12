@@ -198,8 +198,7 @@ mod tests {
     fn warns_on_world_readable_permissions() {
         use std::os::unix::fs::PermissionsExt;
 
-        let path =
-            std::env::temp_dir().join(format!("upt-pause-perm-test-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("upt-pause-perm-test-{}", std::process::id()));
         fs::write(&path, "user EXAMPLE\npassword hunter2\n").unwrap();
 
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();

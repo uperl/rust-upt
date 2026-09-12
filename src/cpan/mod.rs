@@ -75,6 +75,7 @@ use cpan_packagedetails::PackageDetails;
 use metacpan_api_modern::Client;
 use metacpan_api_modern::reqwest::Url;
 use metacpan_api_modern::types::{DownloadUrl, Release};
+use reqwest::multipart::{Form, Part};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
@@ -84,6 +85,10 @@ mod pause;
 
 /// `User-Agent` sent with every MetaCPAN request and tarball download.
 const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
+
+/// Where `upt cpan upload` POSTs releases, same as `cpan-upload`'s default —
+/// and, like it, overridable through `CPAN_UPLOADER_UPLOAD_URI`.
+const DEFAULT_PAUSE_UPLOAD_URI: &str = "https://pause.perl.org/pause/authenquery?ACTION=add_uri";
 
 /// Entry point for the `cpan` built-in: parse `args` with clap, then dispatch.
 pub fn run(cx: &crate::Cx, args: &[String]) -> Result<i32> {
@@ -329,16 +334,98 @@ fn install(cx: &crate::Cx, args: InstallArgs) -> Result<i32> {
     Ok(0)
 }
 
-/// `upt cpan upload`: upload one or more distribution tarballs to PAUSE.
-///
-/// Stub — loads and validates PAUSE credentials from `~/.pause`, but the
-/// actual upload is not yet implemented.
-fn upload(_cx: &crate::Cx, _args: UploadArgs) -> Result<i32> {
+/// `upt cpan upload`: upload each tarball to PAUSE, the same way
+/// `cpan-upload` (from `CPAN::Uploader`) does for a local file — none of its
+/// extra options (`--dry-run`, `--user` / `--password` overrides,
+/// `--directory`, `--http-proxy`, `--ignore-errors`, `--md5`, `--retries`,
+/// `--retry-delay`) are implemented: credentials always come from `~/.pause`,
+/// a failed upload aborts the run, and there are no retries.
+fn upload(_cx: &crate::Cx, args: UploadArgs) -> Result<i32> {
     let path = pause::default_path()?;
-    let _credentials = pause::read(&path)
+    let credentials = pause::read(&path)
         .with_context(|| format!("loading PAUSE credentials from {}", path.display()))?;
 
-    bail!("upt cpan upload is not yet implemented");
+    let http = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .build()
+        .context("building the HTTP client")?;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("starting the async runtime")?;
+
+    runtime.block_on(async {
+        for tarball in &args.tarballs {
+            if !tarball.is_file() {
+                eprintln!("warning: skipping non-file {}", tarball.display());
+                continue;
+            }
+            println!("uploading {}...", tarball.display());
+            upload_to_pause(&http, &credentials, tarball).await?;
+            println!("{} uploaded", tarball.display());
+        }
+        anyhow::Ok(())
+    })?;
+
+    Ok(0)
+}
+
+/// POST one tarball to PAUSE's `add_uri` action: a multipart file upload with
+/// HTTP Basic auth, matching the request `cpan-upload` sends for a local
+/// file (PAUSE ids are case-insensitive but conventionally upper-case, and
+/// `cpan-upload` upper-cases whatever it's given, so this does too).
+async fn upload_to_pause(
+    http: &reqwest::Client,
+    credentials: &pause::Credentials,
+    tarball: &Path,
+) -> Result<()> {
+    let user = credentials.user.to_uppercase();
+
+    let file_name = tarball
+        .file_name()
+        .and_then(|name| name.to_str())
+        .with_context(|| format!("{}: not a valid file name", tarball.display()))?
+        .to_string();
+    let bytes = fs::read(tarball).with_context(|| format!("reading {}", tarball.display()))?;
+    let part = Part::bytes(bytes)
+        .file_name(file_name.clone())
+        .mime_str("application/octet-stream")
+        .context("building the upload request")?;
+
+    let form = Form::new()
+        .text("HIDDENNAME", user.clone())
+        .text("CAN_MULTIPART", "1")
+        .text("pause99_add_uri_upload", file_name)
+        .part("pause99_add_uri_httpupload", part)
+        .text("pause99_add_uri_uri", "")
+        .text(
+            "SUBMIT_pause99_add_uri_httpupload",
+            " Upload this file from my disk ",
+        );
+
+    let uri = std::env::var("CPAN_UPLOADER_UPLOAD_URI")
+        .unwrap_or_else(|_| DEFAULT_PAUSE_UPLOAD_URI.to_string());
+
+    let response = http
+        .post(&uri)
+        .basic_auth(user, Some(&credentials.password))
+        .multipart(form)
+        .send()
+        .await
+        .with_context(|| format!("uploading {} to {uri}", tarball.display()))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        bail!(
+            "uploading {} failed: HTTP {} {}",
+            tarball.display(),
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("")
+        );
+    }
+
+    Ok(())
 }
 
 /// Fetch and parse `<mirror>/modules/02packages.details.txt.gz`.
@@ -1426,8 +1513,10 @@ mod tests {
 
     #[test]
     fn upload_does_not_accept_source_or_url_overrides() {
-        assert!(Cli::try_parse_from(["upt cpan", "upload", "foo.tar.gz", "--source", "mirror"])
-            .is_err());
+        assert!(
+            Cli::try_parse_from(["upt cpan", "upload", "foo.tar.gz", "--source", "mirror"])
+                .is_err()
+        );
         assert!(
             Cli::try_parse_from([
                 "upt cpan",

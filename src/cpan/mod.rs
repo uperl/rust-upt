@@ -98,6 +98,7 @@ pub fn run(cx: &crate::Cx, args: &[String]) -> Result<i32> {
     let Cli { common, command } = cli;
     match command {
         Command::Install(args) => install(cx, &common, args),
+        Command::Upload(args) => upload(cx, &common, args),
     }
 }
 
@@ -190,6 +191,9 @@ enum Command {
     /// `--recommended` / `--suggested`, or best-effort with `--try-recommended` /
     /// `--try-suggested`).
     Install(InstallArgs),
+
+    /// Upload one or more distribution tarballs to PAUSE. Not yet implemented.
+    Upload(UploadArgs),
 }
 
 /// Arguments for `upt cpan install`.
@@ -234,6 +238,14 @@ struct InstallArgs {
     /// at the configure step.
     #[arg(long = "pure-perl", visible_alias = "pureperl")]
     pure_perl: bool,
+}
+
+/// Arguments for `upt cpan upload`.
+#[derive(Debug, Args)]
+struct UploadArgs {
+    /// Distribution tarballs to upload (e.g. `JSON-PP-4.16.tar.gz`).
+    #[arg(value_name = "TARBALL", required = true)]
+    tarballs: Vec<PathBuf>,
 }
 
 /// `upt cpan install`: set up the run directory, then walk each SPEC through the
@@ -312,6 +324,13 @@ fn install(cx: &crate::Cx, common: &CommonArgs, args: InstallArgs) -> Result<i32
     })?;
 
     Ok(0)
+}
+
+/// `upt cpan upload`: upload one or more distribution tarballs to PAUSE.
+///
+/// Stub — not yet implemented.
+fn upload(_cx: &crate::Cx, _common: &CommonArgs, _args: UploadArgs) -> Result<i32> {
+    bail!("upt cpan upload is not yet implemented");
 }
 
 /// Fetch and parse `<mirror>/modules/02packages.details.txt.gz`.

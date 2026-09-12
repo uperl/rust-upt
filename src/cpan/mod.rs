@@ -19,6 +19,14 @@
 //!   that fail to install. `--pure-perl` builds every distribution without
 //!   compiling XS (`PUREPERL_ONLY=1` / `--pureperl-only` at the configure step).
 //!
+//! * `upt cpan upload <TARBALL>...` uploads one or more distribution tarballs
+//!   to PAUSE, the same way `cpan-upload` (from `CPAN::Uploader`) does for a
+//!   local file, using credentials from `~/.pause` — none of its extra
+//!   options are implemented. `--check` instead verifies those credentials
+//!   against PAUSE without uploading anything; this isn't part of
+//!   `cpan-upload` and relies on undocumented PAUSE server behavior rather
+//!   than a documented API — see [`check_pause_credentials`].
+//!
 //! # Resolution
 //!
 //! With `cpan.source = "metacpan"` (the default) each SPEC is resolved through
@@ -36,8 +44,9 @@
 //!
 //! The `[cpan]` config section (`source`, `metacpan-base-url`,
 //! `mirror-base-url`) supplies the defaults; `--source`, `--metacpan-base-url`
-//! and `--mirror-base-url` override them for a single invocation and may be
-//! given before or after the subcommand name.
+//! and `--mirror-base-url` override them for a single `upt cpan install`
+//! invocation. `upt cpan upload` doesn't fetch anything, so it has none of
+//! these options.
 //!
 //! # Cache layout
 //!
@@ -74,13 +83,20 @@ use cpan_packagedetails::PackageDetails;
 use metacpan_api_modern::Client;
 use metacpan_api_modern::reqwest::Url;
 use metacpan_api_modern::types::{DownloadUrl, Release};
+use reqwest::multipart::{Form, Part};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::config::CpanSource;
 
+mod pause;
+
 /// `User-Agent` sent with every MetaCPAN request and tarball download.
 const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
+
+/// Where `upt cpan upload` POSTs releases, same as `cpan-upload`'s default —
+/// and, like it, overridable through `CPAN_UPLOADER_UPLOAD_URI`.
+const DEFAULT_PAUSE_UPLOAD_URI: &str = "https://pause.perl.org/pause/authenquery?ACTION=add_uri";
 
 /// Entry point for the `cpan` built-in: parse `args` with clap, then dispatch.
 pub fn run(cx: &crate::Cx, args: &[String]) -> Result<i32> {
@@ -95,9 +111,10 @@ pub fn run(cx: &crate::Cx, args: &[String]) -> Result<i32> {
         }
     };
 
-    let Cli { common, command } = cli;
+    let Cli { command } = cli;
     match command {
-        Command::Install(args) => install(cx, &common, args),
+        Command::Install(args) => install(cx, args),
+        Command::Upload(args) => upload(cx, args),
     }
 }
 
@@ -110,27 +127,24 @@ pub fn run(cx: &crate::Cx, args: &[String]) -> Result<i32> {
     long_about = None,
 )]
 struct Cli {
-    #[command(flatten)]
-    common: CommonArgs,
-
     #[command(subcommand)]
     command: Command,
 }
 
-/// Options that override the `[cpan]` config section. They are `global`, so
-/// they may appear before or after the subcommand name.
+/// Options that override the `[cpan]` config section for `upt cpan install`
+/// (`upt cpan upload` doesn't fetch anything, so it has no use for these).
 #[derive(Debug, Args)]
 struct CommonArgs {
     /// Where to fetch releases from, overriding `cpan.source`.
-    #[arg(long, global = true, value_name = "SOURCE")]
+    #[arg(long, value_name = "SOURCE")]
     source: Option<SourceArg>,
 
     /// Base URL of the MetaCPAN API, overriding `cpan.metacpan-base-url`.
-    #[arg(long, global = true, value_name = "URL")]
+    #[arg(long, value_name = "URL")]
     metacpan_base_url: Option<String>,
 
     /// Base URL of the CPAN mirror, overriding `cpan.mirror-base-url`.
-    #[arg(long, global = true, value_name = "URL")]
+    #[arg(long, value_name = "URL")]
     mirror_base_url: Option<String>,
 }
 
@@ -190,11 +204,20 @@ enum Command {
     /// `--recommended` / `--suggested`, or best-effort with `--try-recommended` /
     /// `--try-suggested`).
     Install(InstallArgs),
+
+    /// Upload one or more distribution tarballs to PAUSE, using credentials
+    /// from `~/.pause`, the same way `cpan-upload` does for a local file
+    /// (none of its extra options are implemented). `--check` instead
+    /// verifies those credentials without uploading anything.
+    Upload(UploadArgs),
 }
 
 /// Arguments for `upt cpan install`.
 #[derive(Debug, Args)]
 struct InstallArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+
     /// Modules or distributions to install (e.g. `JSON::PP`, `JSON-PP`).
     #[arg(value_name = "SPEC", required = true)]
     packages: Vec<String>,
@@ -236,10 +259,29 @@ struct InstallArgs {
     pure_perl: bool,
 }
 
+/// Arguments for `upt cpan upload`.
+#[derive(Debug, Args)]
+struct UploadArgs {
+    /// Distribution tarballs to upload (e.g. `JSON-PP-4.16.tar.gz`).
+    #[arg(value_name = "TARBALL", required_unless_present = "check")]
+    tarballs: Vec<PathBuf>,
+
+    /// Check that the configured PAUSE credentials are accepted, without
+    /// uploading anything (no TARBALL is required, or allowed, with this).
+    /// This is not something `cpan-upload` itself provides, and does not use
+    /// a documented PAUSE API: it relies on the fact that every `authenquery`
+    /// request requires HTTP Basic auth, so a bare GET with no `ACTION` (the
+    /// PAUSE menu page) returns `200` for accepted credentials and `401`
+    /// otherwise. PAUSE could change this behavior at any time without
+    /// notice.
+    #[arg(long, conflicts_with = "tarballs")]
+    check: bool,
+}
+
 /// `upt cpan install`: set up the run directory, then walk each SPEC through the
 /// build pipeline on a Tokio runtime.
-fn install(cx: &crate::Cx, common: &CommonArgs, args: InstallArgs) -> Result<i32> {
-    let resolved = common.resolve(cx);
+fn install(cx: &crate::Cx, args: InstallArgs) -> Result<i32> {
+    let resolved = args.common.resolve(cx);
 
     let (_name, perl_config) = crate::perl::resolve_perl(cx, args.perl.as_deref())?;
     let perl = crate::perl::build_wrapper(perl_config)?.with_capture_output(true);
@@ -312,6 +354,155 @@ fn install(cx: &crate::Cx, common: &CommonArgs, args: InstallArgs) -> Result<i32
     })?;
 
     Ok(0)
+}
+
+/// `upt cpan upload`: upload each tarball to PAUSE, the same way
+/// `cpan-upload` (from `CPAN::Uploader`) does for a local file — none of its
+/// extra options (`--dry-run`, `--user` / `--password` overrides,
+/// `--directory`, `--http-proxy`, `--ignore-errors`, `--md5`, `--retries`,
+/// `--retry-delay`) are implemented: credentials always come from `~/.pause`,
+/// a failed upload aborts the run, and there are no retries.
+fn upload(_cx: &crate::Cx, args: UploadArgs) -> Result<i32> {
+    let path = pause::default_path()?;
+    let credentials = pause::read(&path)
+        .with_context(|| format!("loading PAUSE credentials from {}", path.display()))?;
+
+    let http = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .build()
+        .context("building the HTTP client")?;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("starting the async runtime")?;
+
+    if args.check {
+        return runtime.block_on(check_pause_credentials(&http, &credentials));
+    }
+
+    runtime.block_on(async {
+        for tarball in &args.tarballs {
+            if !tarball.is_file() {
+                eprintln!("warning: skipping non-file {}", tarball.display());
+                continue;
+            }
+            println!("uploading {}...", tarball.display());
+            upload_to_pause(&http, &credentials, tarball).await?;
+            println!("{} uploaded", tarball.display());
+        }
+        anyhow::Ok(())
+    })?;
+
+    Ok(0)
+}
+
+/// `upt cpan upload --check`: verify the configured PAUSE credentials without
+/// uploading anything.
+///
+/// **This uses an undocumented PAUSE behavior, not a documented API.**
+/// `cpan-upload` / `CPAN::Uploader` have no equivalent — every `authenquery`
+/// request requires HTTP Basic auth, so a bare GET with no `ACTION` (the
+/// PAUSE menu page) returns `200` if the credentials are accepted and `401`
+/// otherwise; nothing about that is a documented contract, and PAUSE could
+/// change it at any time without notice.
+async fn check_pause_credentials(
+    http: &reqwest::Client,
+    credentials: &pause::Credentials,
+) -> Result<i32> {
+    let user = credentials.user.to_uppercase();
+    let uri = pause_authenquery_uri();
+
+    let response = http
+        .get(&uri)
+        .basic_auth(&user, Some(&credentials.password))
+        .send()
+        .await
+        .with_context(|| format!("checking credentials against {uri}"))?;
+
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        bail!("PAUSE rejected the credentials for {user}");
+    }
+    if !status.is_success() {
+        bail!(
+            "checking credentials failed: HTTP {} {}",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("")
+        );
+    }
+
+    println!("credentials for {user} are valid");
+    Ok(0)
+}
+
+/// The bare `authenquery` URI (no `ACTION`) used by [`check_pause_credentials`]:
+/// the same host as [`DEFAULT_PAUSE_UPLOAD_URI`], respecting
+/// `CPAN_UPLOADER_UPLOAD_URI`, with its `?ACTION=...` query dropped.
+fn pause_authenquery_uri() -> String {
+    let upload_uri = std::env::var("CPAN_UPLOADER_UPLOAD_URI")
+        .unwrap_or_else(|_| DEFAULT_PAUSE_UPLOAD_URI.to_string());
+    upload_uri
+        .split_once('?')
+        .map_or(upload_uri.as_str(), |(base, _query)| base)
+        .to_string()
+}
+
+/// POST one tarball to PAUSE's `add_uri` action: a multipart file upload with
+/// HTTP Basic auth, matching the request `cpan-upload` sends for a local
+/// file (PAUSE ids are case-insensitive but conventionally upper-case, and
+/// `cpan-upload` upper-cases whatever it's given, so this does too).
+async fn upload_to_pause(
+    http: &reqwest::Client,
+    credentials: &pause::Credentials,
+    tarball: &Path,
+) -> Result<()> {
+    let user = credentials.user.to_uppercase();
+
+    let file_name = tarball
+        .file_name()
+        .and_then(|name| name.to_str())
+        .with_context(|| format!("{}: not a valid file name", tarball.display()))?
+        .to_string();
+    let bytes = fs::read(tarball).with_context(|| format!("reading {}", tarball.display()))?;
+    let part = Part::bytes(bytes)
+        .file_name(file_name.clone())
+        .mime_str("application/octet-stream")
+        .context("building the upload request")?;
+
+    let form = Form::new()
+        .text("HIDDENNAME", user.clone())
+        .text("CAN_MULTIPART", "1")
+        .text("pause99_add_uri_upload", file_name)
+        .part("pause99_add_uri_httpupload", part)
+        .text("pause99_add_uri_uri", "")
+        .text(
+            "SUBMIT_pause99_add_uri_httpupload",
+            " Upload this file from my disk ",
+        );
+
+    let uri = std::env::var("CPAN_UPLOADER_UPLOAD_URI")
+        .unwrap_or_else(|_| DEFAULT_PAUSE_UPLOAD_URI.to_string());
+
+    let response = http
+        .post(&uri)
+        .basic_auth(user, Some(&credentials.password))
+        .multipart(form)
+        .send()
+        .await
+        .with_context(|| format!("uploading {} to {uri}", tarball.display()))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        bail!(
+            "uploading {} failed: HTTP {} {}",
+            tarball.display(),
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("")
+        );
+    }
+
+    Ok(())
 }
 
 /// Fetch and parse `<mirror>/modules/02packages.details.txt.gz`.
@@ -1291,6 +1482,7 @@ mod tests {
     fn install_args(args: &[&str]) -> InstallArgs {
         match parse(args).command {
             Command::Install(args) => args,
+            Command::Upload(_) => panic!("expected an `install` command"),
         }
     }
 
@@ -1374,29 +1566,54 @@ mod tests {
     }
 
     #[test]
-    fn source_and_url_overrides_parse_before_or_after_the_subcommand() {
-        let before = parse(&[
+    fn install_accepts_source_and_url_overrides() {
+        let args = install_args(&[
+            "install",
+            "JSON::PP",
             "--source",
             "mirror",
             "--metacpan-base-url",
             "https://api.example/",
             "--mirror-base-url",
             "https://cpan.example/",
-            "install",
-            "JSON::PP",
         ]);
-        assert_eq!(before.common.source, Some(SourceArg::Mirror));
+        assert_eq!(args.common.source, Some(SourceArg::Mirror));
         assert_eq!(
-            before.common.metacpan_base_url.as_deref(),
+            args.common.metacpan_base_url.as_deref(),
             Some("https://api.example/")
         );
         assert_eq!(
-            before.common.mirror_base_url.as_deref(),
+            args.common.mirror_base_url.as_deref(),
             Some("https://cpan.example/")
         );
+    }
 
-        let after = parse(&["install", "JSON::PP", "--source", "metacpan"]);
-        assert_eq!(after.common.source, Some(SourceArg::Metacpan));
+    #[test]
+    fn upload_does_not_accept_source_or_url_overrides() {
+        assert!(
+            Cli::try_parse_from(["upt cpan", "upload", "foo.tar.gz", "--source", "mirror"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "upt cpan",
+                "upload",
+                "foo.tar.gz",
+                "--metacpan-base-url",
+                "https://api.example/"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "upt cpan",
+                "upload",
+                "foo.tar.gz",
+                "--mirror-base-url",
+                "https://cpan.example/"
+            ])
+            .is_err()
+        );
     }
 
     #[test]

@@ -19,6 +19,14 @@
 //!   that fail to install. `--pure-perl` builds every distribution without
 //!   compiling XS (`PUREPERL_ONLY=1` / `--pureperl-only` at the configure step).
 //!
+//! * `upt cpan upload <TARBALL>...` uploads one or more distribution tarballs
+//!   to PAUSE, the same way `cpan-upload` (from `CPAN::Uploader`) does for a
+//!   local file, using credentials from `~/.pause` — none of its extra
+//!   options are implemented. `--check` instead verifies those credentials
+//!   against PAUSE without uploading anything; this isn't part of
+//!   `cpan-upload` and relies on undocumented PAUSE server behavior rather
+//!   than a documented API — see [`check_pause_credentials`].
+//!
 //! # Resolution
 //!
 //! With `cpan.source = "metacpan"` (the default) each SPEC is resolved through
@@ -197,7 +205,10 @@ enum Command {
     /// `--try-suggested`).
     Install(InstallArgs),
 
-    /// Upload one or more distribution tarballs to PAUSE. Not yet implemented.
+    /// Upload one or more distribution tarballs to PAUSE, using credentials
+    /// from `~/.pause`, the same way `cpan-upload` does for a local file
+    /// (none of its extra options are implemented). `--check` instead
+    /// verifies those credentials without uploading anything.
     Upload(UploadArgs),
 }
 
@@ -252,8 +263,19 @@ struct InstallArgs {
 #[derive(Debug, Args)]
 struct UploadArgs {
     /// Distribution tarballs to upload (e.g. `JSON-PP-4.16.tar.gz`).
-    #[arg(value_name = "TARBALL", required = true)]
+    #[arg(value_name = "TARBALL", required_unless_present = "check")]
     tarballs: Vec<PathBuf>,
+
+    /// Check that the configured PAUSE credentials are accepted, without
+    /// uploading anything (no TARBALL is required, or allowed, with this).
+    /// This is not something `cpan-upload` itself provides, and does not use
+    /// a documented PAUSE API: it relies on the fact that every `authenquery`
+    /// request requires HTTP Basic auth, so a bare GET with no `ACTION` (the
+    /// PAUSE menu page) returns `200` for accepted credentials and `401`
+    /// otherwise. PAUSE could change this behavior at any time without
+    /// notice.
+    #[arg(long, conflicts_with = "tarballs")]
+    check: bool,
 }
 
 /// `upt cpan install`: set up the run directory, then walk each SPEC through the
@@ -355,6 +377,10 @@ fn upload(_cx: &crate::Cx, args: UploadArgs) -> Result<i32> {
         .build()
         .context("starting the async runtime")?;
 
+    if args.check {
+        return runtime.block_on(check_pause_credentials(&http, &credentials));
+    }
+
     runtime.block_on(async {
         for tarball in &args.tarballs {
             if !tarball.is_file() {
@@ -369,6 +395,57 @@ fn upload(_cx: &crate::Cx, args: UploadArgs) -> Result<i32> {
     })?;
 
     Ok(0)
+}
+
+/// `upt cpan upload --check`: verify the configured PAUSE credentials without
+/// uploading anything.
+///
+/// **This uses an undocumented PAUSE behavior, not a documented API.**
+/// `cpan-upload` / `CPAN::Uploader` have no equivalent — every `authenquery`
+/// request requires HTTP Basic auth, so a bare GET with no `ACTION` (the
+/// PAUSE menu page) returns `200` if the credentials are accepted and `401`
+/// otherwise; nothing about that is a documented contract, and PAUSE could
+/// change it at any time without notice.
+async fn check_pause_credentials(
+    http: &reqwest::Client,
+    credentials: &pause::Credentials,
+) -> Result<i32> {
+    let user = credentials.user.to_uppercase();
+    let uri = pause_authenquery_uri();
+
+    let response = http
+        .get(&uri)
+        .basic_auth(&user, Some(&credentials.password))
+        .send()
+        .await
+        .with_context(|| format!("checking credentials against {uri}"))?;
+
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        bail!("PAUSE rejected the credentials for {user}");
+    }
+    if !status.is_success() {
+        bail!(
+            "checking credentials failed: HTTP {} {}",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("")
+        );
+    }
+
+    println!("credentials for {user} are valid");
+    Ok(0)
+}
+
+/// The bare `authenquery` URI (no `ACTION`) used by [`check_pause_credentials`]:
+/// the same host as [`DEFAULT_PAUSE_UPLOAD_URI`], respecting
+/// `CPAN_UPLOADER_UPLOAD_URI`, with its `?ACTION=...` query dropped.
+fn pause_authenquery_uri() -> String {
+    let upload_uri = std::env::var("CPAN_UPLOADER_UPLOAD_URI")
+        .unwrap_or_else(|_| DEFAULT_PAUSE_UPLOAD_URI.to_string());
+    upload_uri
+        .split_once('?')
+        .map_or(upload_uri.as_str(), |(base, _query)| base)
+        .to_string()
 }
 
 /// POST one tarball to PAUSE's `add_uri` action: a multipart file upload with

@@ -36,8 +36,9 @@
 //!
 //! The `[cpan]` config section (`source`, `metacpan-base-url`,
 //! `mirror-base-url`) supplies the defaults; `--source`, `--metacpan-base-url`
-//! and `--mirror-base-url` override them for a single invocation and may be
-//! given before or after the subcommand name.
+//! and `--mirror-base-url` override them for a single `upt cpan install`
+//! invocation. `upt cpan upload` doesn't fetch anything, so it has none of
+//! these options.
 //!
 //! # Cache layout
 //!
@@ -97,10 +98,10 @@ pub fn run(cx: &crate::Cx, args: &[String]) -> Result<i32> {
         }
     };
 
-    let Cli { common, command } = cli;
+    let Cli { command } = cli;
     match command {
-        Command::Install(args) => install(cx, &common, args),
-        Command::Upload(args) => upload(cx, &common, args),
+        Command::Install(args) => install(cx, args),
+        Command::Upload(args) => upload(cx, args),
     }
 }
 
@@ -113,27 +114,24 @@ pub fn run(cx: &crate::Cx, args: &[String]) -> Result<i32> {
     long_about = None,
 )]
 struct Cli {
-    #[command(flatten)]
-    common: CommonArgs,
-
     #[command(subcommand)]
     command: Command,
 }
 
-/// Options that override the `[cpan]` config section. They are `global`, so
-/// they may appear before or after the subcommand name.
+/// Options that override the `[cpan]` config section for `upt cpan install`
+/// (`upt cpan upload` doesn't fetch anything, so it has no use for these).
 #[derive(Debug, Args)]
 struct CommonArgs {
     /// Where to fetch releases from, overriding `cpan.source`.
-    #[arg(long, global = true, value_name = "SOURCE")]
+    #[arg(long, value_name = "SOURCE")]
     source: Option<SourceArg>,
 
     /// Base URL of the MetaCPAN API, overriding `cpan.metacpan-base-url`.
-    #[arg(long, global = true, value_name = "URL")]
+    #[arg(long, value_name = "URL")]
     metacpan_base_url: Option<String>,
 
     /// Base URL of the CPAN mirror, overriding `cpan.mirror-base-url`.
-    #[arg(long, global = true, value_name = "URL")]
+    #[arg(long, value_name = "URL")]
     mirror_base_url: Option<String>,
 }
 
@@ -201,6 +199,9 @@ enum Command {
 /// Arguments for `upt cpan install`.
 #[derive(Debug, Args)]
 struct InstallArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+
     /// Modules or distributions to install (e.g. `JSON::PP`, `JSON-PP`).
     #[arg(value_name = "SPEC", required = true)]
     packages: Vec<String>,
@@ -252,8 +253,8 @@ struct UploadArgs {
 
 /// `upt cpan install`: set up the run directory, then walk each SPEC through the
 /// build pipeline on a Tokio runtime.
-fn install(cx: &crate::Cx, common: &CommonArgs, args: InstallArgs) -> Result<i32> {
-    let resolved = common.resolve(cx);
+fn install(cx: &crate::Cx, args: InstallArgs) -> Result<i32> {
+    let resolved = args.common.resolve(cx);
 
     let (_name, perl_config) = crate::perl::resolve_perl(cx, args.perl.as_deref())?;
     let perl = crate::perl::build_wrapper(perl_config)?.with_capture_output(true);
@@ -332,7 +333,7 @@ fn install(cx: &crate::Cx, common: &CommonArgs, args: InstallArgs) -> Result<i32
 ///
 /// Stub — loads and validates PAUSE credentials from `~/.pause`, but the
 /// actual upload is not yet implemented.
-fn upload(_cx: &crate::Cx, _common: &CommonArgs, _args: UploadArgs) -> Result<i32> {
+fn upload(_cx: &crate::Cx, _args: UploadArgs) -> Result<i32> {
     let path = pause::default_path()?;
     let _credentials = pause::read(&path)
         .with_context(|| format!("loading PAUSE credentials from {}", path.display()))?;
@@ -1401,29 +1402,52 @@ mod tests {
     }
 
     #[test]
-    fn source_and_url_overrides_parse_before_or_after_the_subcommand() {
-        let before = parse(&[
+    fn install_accepts_source_and_url_overrides() {
+        let args = install_args(&[
+            "install",
+            "JSON::PP",
             "--source",
             "mirror",
             "--metacpan-base-url",
             "https://api.example/",
             "--mirror-base-url",
             "https://cpan.example/",
-            "install",
-            "JSON::PP",
         ]);
-        assert_eq!(before.common.source, Some(SourceArg::Mirror));
+        assert_eq!(args.common.source, Some(SourceArg::Mirror));
         assert_eq!(
-            before.common.metacpan_base_url.as_deref(),
+            args.common.metacpan_base_url.as_deref(),
             Some("https://api.example/")
         );
         assert_eq!(
-            before.common.mirror_base_url.as_deref(),
+            args.common.mirror_base_url.as_deref(),
             Some("https://cpan.example/")
         );
+    }
 
-        let after = parse(&["install", "JSON::PP", "--source", "metacpan"]);
-        assert_eq!(after.common.source, Some(SourceArg::Metacpan));
+    #[test]
+    fn upload_does_not_accept_source_or_url_overrides() {
+        assert!(Cli::try_parse_from(["upt cpan", "upload", "foo.tar.gz", "--source", "mirror"])
+            .is_err());
+        assert!(
+            Cli::try_parse_from([
+                "upt cpan",
+                "upload",
+                "foo.tar.gz",
+                "--metacpan-base-url",
+                "https://api.example/"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "upt cpan",
+                "upload",
+                "foo.tar.gz",
+                "--mirror-base-url",
+                "https://cpan.example/"
+            ])
+            .is_err()
+        );
     }
 
     #[test]

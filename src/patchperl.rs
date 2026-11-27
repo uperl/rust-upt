@@ -15,6 +15,40 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+/// A clap description of the hand-parsed command line in [`parse`], used only
+/// to generate `upt completions` scripts. Keep it in step with [`parse`] and
+/// [`usage_full`].
+pub fn command() -> clap::Command {
+    use clap::{Arg, ArgAction, Command, ValueHint};
+
+    Command::new("patchperl")
+        .about("Patch a Perl source tree so it builds on a modern toolchain")
+        .disable_version_flag(true)
+        .arg(
+            Arg::new("patchlevel")
+                .long("patchlevel")
+                .action(ArgAction::SetTrue)
+                .help("Update patchlevel.h even inside a git checkout"),
+        )
+        .arg(
+            Arg::new("version")
+                .long("version")
+                .action(ArgAction::SetTrue)
+                .help("Print version information, then exit"),
+        )
+        .arg(
+            Arg::new("source-dir")
+                .value_name("SOURCE_DIR")
+                .value_hint(ValueHint::DirPath)
+                .help("Root of an unpacked Perl source tree (default: .)"),
+        )
+        .arg(
+            Arg::new("perl-version")
+                .value_name("VERSION")
+                .help("The Perl version to patch as"),
+        )
+}
+
 /// Entry point for the `patchperl` drop-in replacement.
 pub fn run(_cx: &crate::Cx, argv: &[String]) -> Result<i32> {
     // Surface the `patch-perl` crate's `log` output (it warns about an

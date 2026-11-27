@@ -18,6 +18,18 @@ that subcommand's help. For an external `upt-<name>` command, run
 `upt-<name> --help`.
 ";
 
+/// A clap description of the hand-parsed command line in [`run`], used only to
+/// generate `upt completions` scripts.
+pub fn command() -> clap::Command {
+    clap::Command::new("help")
+        .about("Show help for upt or one of its subcommands")
+        .arg(
+            clap::Arg::new("subcommand")
+                .value_name("SUBCOMMAND")
+                .value_parser(commands::builtin_names()),
+        )
+}
+
 pub fn run(cx: &Cx, args: &[String]) -> Result<i32> {
     // Ignore leading flags such as `-h`; the first bare word is the topic.
     let Some(topic) = args.iter().find(|a| !a.starts_with('-')) else {

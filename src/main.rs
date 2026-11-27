@@ -116,6 +116,12 @@ fn run() -> Result<i32> {
         return Ok(0);
     }
 
+    // Completion scripts come from the CLI definition alone: answer before
+    // loading (or creating) the config, so they work in any environment.
+    if cli.subcommand.as_deref() == Some("completions") {
+        return commands::completions::run_standalone(&cli.args);
+    }
+
     let cx = build_cx(cli.config, cli.color)?;
 
     let Some(name) = cli.subcommand else {

@@ -22,6 +22,106 @@ use args::{BuildArgs, Outcome};
 /// Where `perl-build blead` fetches the development tip from.
 const BLEAD_URL: &str = "https://github.com/Perl/perl5/archive/blead.tar.gz";
 
+/// A clap description of the hand-parsed command line in [`args`], used only
+/// to generate `upt completions` scripts. Keep it in step with [`args::parse`]
+/// and [`usage_full`].
+pub fn command() -> clap::Command {
+    use clap::{Arg, ArgAction, Command, ValueHint};
+
+    let flag = |long: &'static str, help: &'static str| {
+        Arg::new(long)
+            .long(long)
+            .help(help)
+            .action(ArgAction::SetTrue)
+    };
+    let configure = |short: char, name: &'static str, value: &'static str, help: &'static str| {
+        Arg::new(name)
+            .short(short)
+            .value_name(value)
+            .help(help)
+            .action(ArgAction::Append)
+    };
+    Command::new("perlbuild")
+        .about("Build and install a perl from source")
+        .disable_version_flag(true)
+        .arg(configure(
+            'D',
+            "define",
+            "DEFINE",
+            "Pass -D<define> to ./Configure",
+        ))
+        .arg(configure(
+            'A',
+            "append",
+            "APPEND",
+            "Pass -A<append> to ./Configure",
+        ))
+        .arg(configure(
+            'U',
+            "undef",
+            "UNDEF",
+            "Pass -U<undef> to ./Configure",
+        ))
+        .arg(flag("test", "Run the test suite after building"))
+        .arg(flag("no-test", "Do not run the test suite"))
+        .arg(
+            Arg::new("jobs")
+                .short('j')
+                .long("jobs")
+                .value_name("N")
+                .help("Build (and test) with N parallel jobs"),
+        )
+        .arg(
+            Arg::new("build-dir")
+                .long("build-dir")
+                .value_name("DIR")
+                .value_hint(ValueHint::DirPath)
+                .help("Unpack and build here"),
+        )
+        .arg(
+            Arg::new("tarball-dir")
+                .long("tarball-dir")
+                .value_name("DIR")
+                .value_hint(ValueHint::DirPath)
+                .help("Download source tarballs here"),
+        )
+        .arg(
+            Arg::new("patches")
+                .long("patches")
+                .value_name("PLUGIN")
+                .help("Set PERL5_PATCHPERL_PLUGIN for patchperl"),
+        )
+        .arg(flag(
+            "symlink-devel-executables",
+            "Symlink versioned dev executables",
+        ))
+        .arg(flag("noman", "Skip manpages"))
+        .arg(flag(
+            "definitions",
+            "List the perl versions available on CPAN, then exit",
+        ))
+        .arg(flag("version", "Print version information, then exit"))
+        .arg(
+            Arg::new("stuff")
+                .value_name("STUFF")
+                .value_hint(ValueHint::AnyPath)
+                .help("A version, URL, tarball, or `blead`"),
+        )
+        .arg(
+            Arg::new("destination")
+                .value_name("DESTINATION")
+                .value_hint(ValueHint::DirPath)
+                .help("The install prefix"),
+        )
+        .arg(
+            Arg::new("configure-options")
+                .value_name("CONFIGURE_OPTIONS")
+                .num_args(0..)
+                .last(true)
+                .help("Options passed straight to ./Configure"),
+        )
+}
+
 /// Entry point for the `perlbuild` drop-in replacement.
 pub fn run(cx: &crate::Cx, argv: &[String]) -> Result<i32> {
     // Surface the `perl-build` crate's `log` progress output; `RUST_LOG`

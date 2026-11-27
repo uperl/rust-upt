@@ -72,6 +72,12 @@ use serde_json::{Value, json};
 use crate::json;
 use status::{Phase, Status};
 
+/// The `dist` command line as a clap [`clap::Command`] named `dist`, for
+/// `upt completions`.
+pub fn command() -> clap::Command {
+    <Cli as clap::CommandFactory>::command().name("dist")
+}
+
 /// Entry point for the `dist` built-in: parse `args` with clap, resolve the
 /// colour decision from `cx`, then run the requested build step.
 pub fn run(cx: &crate::Cx, args: &[String]) -> Result<i32> {

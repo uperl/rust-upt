@@ -98,6 +98,12 @@ const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VE
 /// and, like it, overridable through `CPAN_UPLOADER_UPLOAD_URI`.
 const DEFAULT_PAUSE_UPLOAD_URI: &str = "https://pause.perl.org/pause/authenquery?ACTION=add_uri";
 
+/// The `cpan` command line as a clap [`clap::Command`] named `cpan`, for
+/// `upt completions`.
+pub fn command() -> clap::Command {
+    <Cli as clap::CommandFactory>::command().name("cpan")
+}
+
 /// Entry point for the `cpan` built-in: parse `args` with clap, then dispatch.
 pub fn run(cx: &crate::Cx, args: &[String]) -> Result<i32> {
     let argv = std::iter::once(OsString::from("upt cpan")).chain(args.iter().map(OsString::from));

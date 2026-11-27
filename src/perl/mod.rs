@@ -33,6 +33,12 @@ use serde_json::{Value, json as jsonv};
 use crate::config::PerlConfig;
 use crate::json;
 
+/// The `perl` command line as a clap [`clap::Command`] named `perl`, for
+/// `upt completions`.
+pub fn command() -> clap::Command {
+    <Cli as clap::CommandFactory>::command().name("perl")
+}
+
 /// Entry point for the `perl` built-in: parse `args` with clap, then dispatch.
 pub fn run(cx: &crate::Cx, args: &[String]) -> Result<i32> {
     let argv = std::iter::once(OsString::from("upt perl")).chain(args.iter().map(OsString::from));

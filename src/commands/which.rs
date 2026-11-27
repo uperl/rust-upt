@@ -32,6 +32,41 @@ Options:
     -j, --json      Print JSON: an object, or with --all[-legacy] an array.
 ";
 
+/// A clap description of the hand-parsed command line in [`run`], used only to
+/// generate `upt completions` scripts. Keep it in step with [`HELP`].
+pub fn command() -> clap::Command {
+    use clap::{Arg, ArgAction, Command};
+
+    let flag = |short: Option<char>, long: &'static str, help: &'static str| {
+        let arg = Arg::new(long)
+            .long(long)
+            .help(help)
+            .action(ArgAction::SetTrue);
+        match short {
+            Some(short) => arg.short(short),
+            None => arg,
+        }
+    };
+    Command::new("which")
+        .about("Show whether a subcommand is built in or found in PATH")
+        .arg(flag(
+            Some('a'),
+            "all",
+            "List every subcommand instead of looking one up",
+        ))
+        .arg(flag(
+            None,
+            "all-legacy",
+            "List only the drop-in replacement subcommands",
+        ))
+        .arg(flag(Some('j'), "json", "Print JSON"))
+        .arg(
+            Arg::new("subcommand")
+                .value_name("SUBCOMMAND")
+                .value_parser(commands::builtin_names()),
+        )
+}
+
 pub fn run(cx: &Cx, args: &[String]) -> Result<i32> {
     if args.iter().any(|a| a == "-h" || a == "--help") {
         print!("{HELP}");

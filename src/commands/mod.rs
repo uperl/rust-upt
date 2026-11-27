@@ -1,5 +1,6 @@
 //! The registry of built-in subcommands.
 
+pub mod completions;
 pub mod help;
 pub mod which;
 
@@ -25,6 +26,9 @@ pub struct Builtin {
     /// Entry point. Receives the arguments that follow the subcommand name and
     /// returns the process exit code.
     pub run: fn(&Cx, &[String]) -> Result<i32>,
+    /// The subcommand's command line as a clap [`clap::Command`] named
+    /// [`Builtin::name`], from which `upt completions` generates scripts.
+    pub command: fn() -> clap::Command,
 }
 
 /// Every built-in. `upt help` sorts these by name for display; the order here
@@ -36,6 +40,15 @@ pub static BUILTINS: &[Builtin] = &[
         legacy_name: None,
         help: Some(help::HELP),
         run: help::run,
+        command: help::command,
+    },
+    Builtin {
+        name: "completions",
+        summary: "Print a shell completion script for upt",
+        legacy_name: None,
+        help: None,
+        run: completions::run,
+        command: completions::command,
     },
     Builtin {
         name: "which",
@@ -43,6 +56,7 @@ pub static BUILTINS: &[Builtin] = &[
         legacy_name: None,
         help: Some(which::HELP),
         run: which::run,
+        command: which::command,
     },
     Builtin {
         name: "metacpan",
@@ -50,6 +64,7 @@ pub static BUILTINS: &[Builtin] = &[
         legacy_name: None,
         help: None,
         run: crate::metacpan::run,
+        command: crate::metacpan::command,
     },
     Builtin {
         name: "dist",
@@ -57,6 +72,7 @@ pub static BUILTINS: &[Builtin] = &[
         legacy_name: None,
         help: None,
         run: crate::dist::run,
+        command: crate::dist::command,
     },
     Builtin {
         name: "cpan",
@@ -64,6 +80,7 @@ pub static BUILTINS: &[Builtin] = &[
         legacy_name: None,
         help: None,
         run: crate::cpan::run,
+        command: crate::cpan::command,
     },
     Builtin {
         name: "perl",
@@ -71,6 +88,7 @@ pub static BUILTINS: &[Builtin] = &[
         legacy_name: None,
         help: None,
         run: crate::perl::run,
+        command: crate::perl::command,
     },
     Builtin {
         name: "perlbuild",
@@ -78,6 +96,7 @@ pub static BUILTINS: &[Builtin] = &[
         legacy_name: Some("perl-build"),
         help: None,
         run: crate::perlbuild::run,
+        command: crate::perlbuild::command,
     },
     Builtin {
         name: "patchperl",
@@ -85,8 +104,14 @@ pub static BUILTINS: &[Builtin] = &[
         legacy_name: Some("patchperl"),
         help: None,
         run: crate::patchperl::run,
+        command: crate::patchperl::command,
     },
 ];
+
+/// The names of every built-in, in registry order.
+pub fn builtin_names() -> Vec<&'static str> {
+    BUILTINS.iter().map(|b| b.name).collect()
+}
 
 /// Look up a built-in by the name typed after `upt`.
 pub fn find(name: &str) -> Option<&'static Builtin> {

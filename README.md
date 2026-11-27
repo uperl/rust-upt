@@ -36,6 +36,38 @@ Global options (given before the subcommand):
 Show the general help, a built-in subcommand's help, or — for an external
 `upt-<name>` — run `upt-<name> --help`.
 
+### `upt completions <SHELL>`
+
+Print a shell completion script for `upt` to stdout. `SHELL` is one of `zsh`,
+`bash`, `fish`, `powershell` or `elvish`. The script is generated from upt's
+own command-line definitions, so it covers every built-in subcommand, their
+options, and enumerated values such as `--color` or `upt cpan install
+--source` (PowerShell and elvish scripts complete subcommands and options
+only). It needs no config file, credentials or network access. Names of
+CPAN modules, distributions and external `upt-<name>` commands are not
+completed.
+
+```sh
+# zsh: put the script on $fpath (add `fpath+=~/.zfunc` before `compinit`
+# in ~/.zshrc)
+upt completions zsh > ~/.zfunc/_upt
+
+# bash
+upt completions bash > ~/.local/share/bash-completion/completions/upt
+
+# fish
+upt completions fish > ~/.config/fish/completions/upt.fish
+
+# PowerShell
+upt completions powershell >> $PROFILE
+
+# elvish
+upt completions elvish >> ~/.config/elvish/rc.elv
+```
+
+Regenerate the script after upgrading `upt` to pick up new commands and
+options.
+
 ### `upt which [--json] <SUBCOMMAND>`
 
 Report whether a subcommand is built in (`internal`) and/or resolves to an

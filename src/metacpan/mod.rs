@@ -29,6 +29,12 @@ use sha2::{Digest, Sha256};
 /// `User-Agent` sent with every request; also shown in `--raw` output.
 const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
+/// The `metacpan` command line as a clap [`clap::Command`] named `metacpan`, for
+/// `upt completions`.
+pub fn command() -> clap::Command {
+    <Cli as clap::CommandFactory>::command().name("metacpan")
+}
+
 /// Entry point for the `metacpan` built-in: parse `args` with clap, then run the
 /// request on a fresh Tokio runtime.
 pub fn run(cx: &crate::Cx, args: &[String]) -> Result<i32> {
